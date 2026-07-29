@@ -1,0 +1,90 @@
+name: Gateway smoke test
+
+# Builds the whole estate from sibling checkouts and proves the gateway
+# actually routes to live, working backends — the thing no single app repo's
+# CI can verify on its own. Cross-repo checkout needs a PAT with read access
+# to GorillaHR and Recruitment.Gorilla: set secrets.CROSS_REPO_TOKEN
+# (the default GITHUB_TOKEN only covers this repo).
+
+on:
+  push:
+    branches: [develop, master]
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout gorilla-platform
+        uses: actions/checkout@v4
+        with:
+          path: gorilla-platform
+
+      # Sibling layout matches deploy/compose.yaml's relative build contexts
+      # (../../GorillaHR, ../../Recruitment.Gorilla) — see deploy/README.md.
+      - name: Checkout GorillaHR
+        uses: actions/checkout@v4
+        with:
+          repository: tahmidsparrow/GorillaHR
+          ref: develop
+          token: ${{ secrets.CROSS_REPO_TOKEN }}
+          path: GorillaHR
+
+      - name: Checkout Recruitment.Gorilla
+        uses: actions/checkout@v4
+        with:
+          repository: tahmidsparrow/Recruitment.Gorilla
+          ref: develop
+          token: ${{ secrets.CROSS_REPO_TOKEN }}
+          path: Recruitment.Gorilla
+
+      - name: Write deploy/.env
+        working-directory: gorilla-platform/deploy
+        run: |
+          cat > .env <<'EOF'
+          MYSQL_ROOT_PASSWORD=ci-root-pw
+          GORILLAHR_DB_PASSWORD=ci-hr-pw
+          RECRUITMENT_DB_PASSWORD=ci-ats-pw
+          HR_SECRET_KEY=ci-only-not-a-real-secret-please-change
+          ATS_JWT_KEY=ci-only-not-a-real-secret-32-bytes-min
+          ATS_SEED_ADMIN_EMAIL=admin@recruitmentgorilla.com
+          ATS_SEED_ADMIN_PASSWORD_HASH=1000.Y2ktc2FsdA==.Y2ktaGFzaA==
+          EOF
+
+      - name: Build and start the stack
+        working-directory: gorilla-platform/deploy
+        run: docker compose up -d --build
+
+      - name: Wait for the gateway
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://localhost/hr/api/health && exit 0
+            sleep 2
+          done
+          echo "Gateway never came up"; exit 1
+
+      - name: HR is reachable through the gateway
+        run: curl -sf http://localhost/hr/api/health
+
+      - name: HR SPA is served through the gateway
+        run: curl -sf http://localhost/hr/ | grep -qi "<!doctype html"
+
+      # RG has no dedicated health endpoint yet — a 401 (not a connection
+      # failure) proves the gateway is routing to a live backend.
+      - name: Recruitment API is reachable through the gateway
+        run: |
+          status=$(curl -s -o /dev/null -w "%{http_code}" http://localhost/ats/api/candidates)
+          test "$status" = "401"
+
+      - name: Recruitment SPA is served through the gateway
+        run: curl -sf http://localhost/ats/ | grep -qi "<!doctype html"
+
+      - name: Dump logs on failure
+        if: failure()
+        working-directory: gorilla-platform/deploy
+        run: docker compose logs
+
+      - name: Tear down
+        if: always()
+        working-directory: gorilla-platform/deploy
+        run: docker compose down -v

@@ -1,0 +1,120 @@
+name: gorilla
+
+networks:
+  gorilla:
+
+volumes:
+  mysql_data:
+  hr_uploads:
+  ats_uploads:
+
+services:
+  mysql:
+    image: mysql:9
+    networks: [gorilla]
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      GORILLAHR_DB_PASSWORD: ${GORILLAHR_DB_PASSWORD}
+      RECRUITMENT_DB_PASSWORD: ${RECRUITMENT_DB_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+    # No `ports:` — only the gateway is reachable from the host.
+
+  # One-shot: runs `alembic upgrade head` and exits. hr-api waits for it to
+  # succeed rather than migrating on its own boot, so scaling hr-api to >1
+  # replica later never races a schema migration.
+  hr-migrate:
+    build:
+      context: ../../GorillaHR/backend
+    networks: [gorilla]
+    environment:
+      DATABASE_URL: mysql+pymysql://gorillahr_app:${GORILLAHR_DB_PASSWORD}@mysql:3306/gorillahr
+    entrypoint: ["alembic", "upgrade", "head"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  hr-api:
+    build:
+      context: ../../GorillaHR/backend
+    networks: [gorilla]
+    environment:
+      DATABASE_URL: mysql+pymysql://gorillahr_app:${GORILLAHR_DB_PASSWORD}@mysql:3306/gorillahr
+      SECRET_KEY: ${HR_SECRET_KEY}
+      CORS_ORIGINS: ""
+      UPLOAD_DIR: uploads
+    volumes:
+      - hr_uploads:/app/uploads
+    depends_on:
+      hr-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    # No `ports:` — only the gateway is reachable from the host.
+
+  hr-web:
+    build:
+      context: ../../GorillaHR/frontend
+    networks: [gorilla]
+    depends_on:
+      hr-api:
+        condition: service_started
+    restart: unless-stopped
+
+  ats-api:
+    build:
+      context: ../../Recruitment.Gorilla/server
+    networks: [gorilla]
+    environment:
+      ASPNETCORE_URLS: http://+:8080
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__DefaultConnection: >-
+        server=mysql;port=3306;database=RecruitmentGorilla;
+        user=recruitment_app;password=${RECRUITMENT_DB_PASSWORD}
+      Jwt__Key: ${ATS_JWT_KEY}
+      Jwt__Issuer: RecruitmentGorilla
+      Jwt__Audience: RecruitmentGorilla
+      Auth__SeedAdminEmail: ${ATS_SEED_ADMIN_EMAIL}
+      Auth__PasswordHash: ${ATS_SEED_ADMIN_PASSWORD_HASH}
+      # AllowedOrigins is intentionally not set here: ASPNETCORE_ENVIRONMENT=Production
+      # means appsettings.json's base "AllowedOrigins": [] applies, and a later env-var
+      # layer cannot truncate an array from an earlier layer — only appsettings.Development.json
+      # (not loaded in Production) carries real origins. See appsettings.json / .Development.json.
+    volumes:
+      - ats_uploads:/app/Uploads
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+    # No `ports:` — only the gateway is reachable from the host. Honors RG's
+    # loopback-only golden rule at the network layer (see AGENTS.md rule 2).
+
+  ats-web:
+    build:
+      context: ../../Recruitment.Gorilla/client
+    networks: [gorilla]
+    depends_on:
+      ats-api:
+        condition: service_started
+    restart: unless-stopped
+
+  gateway:
+    image: nginx:alpine
+    networks: [gorilla]
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/proxy_common.conf:/etc/nginx/proxy_common.conf:ro
+    depends_on:
+      hr-api: { condition: service_started }
+      hr-web: { condition: service_started }
+      ats-api: { condition: service_started }
+      ats-web: { condition: service_started }
+    restart: unless-stopped
