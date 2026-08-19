@@ -3,7 +3,7 @@
 Docker Compose stack for the Gorilla estate: `hr-api` / `hr-web` (GorillaHR),
 `ats-api` / `ats-web` (Recruitment.Gorilla), `mysql`, and the `gateway`
 (nginx) that puts them all under one origin via path prefixes (`/hr`, `/ats`;
-`/id` lands in P1 once the identity service exists).
+`/iam` lands in P1 once the Gorilla.IAM service exists).
 
 ## Sibling-checkout contract
 
@@ -22,7 +22,7 @@ out as siblings under the same parent directory:
 <parent>/
 ├── GorillaHR/
 ├── Recruitment.Gorilla/
-└── gorilla-platform/
+└── Gorilla.Platform/
 ```
 
 This is the local-dev and CI contract until each app publishes tagged images
