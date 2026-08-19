@@ -69,6 +69,20 @@ jobs:
       - name: HR SPA is served through the gateway
         run: curl -sf http://localhost/hr/ | grep -qi "<!doctype html"
 
+      # The SPA must be built with --base=/hr/ (compose passes VITE_BASE). If that
+      # arg is dropped the page still serves and still says <!doctype html>, but
+      # every asset points at /assets/... and 404s behind the gateway — so assert
+      # the prefix, not just that something was returned.
+      - name: HR SPA asset URLs carry the /hr prefix
+        run: curl -sf http://localhost/hr/ | grep -q '"/hr/assets/'
+
+      # /docs, /redoc and /openapi.json sit outside /api, so they only work when
+      # the gateway's explicit locations and hr-api's UVICORN_ROOT_PATH agree.
+      # Fetching the Swagger page and checking it points at the prefixed spec
+      # exercises both halves of that pair.
+      - name: HR API docs resolve behind the gateway
+        run: curl -sf http://localhost/hr/docs | grep -q "/hr/openapi.json"
+
       # RG has no dedicated health endpoint yet — a 401 (not a connection
       # failure) proves the gateway is routing to a live backend.
       - name: Recruitment API is reachable through the gateway

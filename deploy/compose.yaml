@@ -27,16 +27,22 @@ services:
     restart: unless-stopped
     # No `ports:` — only the gateway is reachable from the host.
 
-  # One-shot: runs `alembic upgrade head` and exits. hr-api waits for it to
-  # succeed rather than migrating on its own boot, so scaling hr-api to >1
-  # replica later never races a schema migration.
+  # One-shot: waits for MySQL, runs `alembic upgrade head`, seeds baseline data,
+  # then exits 0. hr-api waits for it to succeed rather than migrating on its own
+  # boot, so scaling hr-api to >1 replica later never races a schema migration.
+  #
+  # The image's own docker-entrypoint.sh does all three steps and then execs its
+  # command, so the command is just a no-op that makes the container exit. Do not
+  # override `entrypoint:` with a bare `alembic` here: that skips both the DB wait
+  # and `python -m app.seed`, and since hr-api runs with RUN_MIGRATIONS=0 nothing
+  # else would ever seed — leaving a schema with no roles, so no one can log in.
   hr-migrate:
     build:
       context: ../../GorillaHR/backend
     networks: [gorilla]
     environment:
       DATABASE_URL: mysql+pymysql://gorillahr_app:${GORILLAHR_DB_PASSWORD}@mysql:3306/gorillahr
-    entrypoint: ["alembic", "upgrade", "head"]
+    command: ["echo", "[hr-migrate] migrate + seed complete"]
     depends_on:
       mysql:
         condition: service_healthy
@@ -50,6 +56,14 @@ services:
       SECRET_KEY: ${HR_SECRET_KEY}
       CORS_ORIGINS: ""
       UPLOAD_DIR: uploads
+      # hr-migrate already ran the upgrade and seed; repeating them on every API
+      # boot races that job and caps this service at one replica.
+      RUN_MIGRATIONS: "0"
+      # Uvicorn's CLI is declared auto_envvar_prefix="UVICORN", so this becomes
+      # --root-path /hr, letting FastAPI's /docs and /openapi.json resolve behind
+      # the gateway. Deliberately env, not app config: export_openapi.py must keep
+      # emitting an unprefixed spec.
+      UVICORN_ROOT_PATH: /hr
     volumes:
       - hr_uploads:/app/uploads
     depends_on:
@@ -61,6 +75,16 @@ services:
   hr-web:
     build:
       context: ../../GorillaHR/frontend
+      args:
+        # GorillaHR's image defaults to its own standalone deployment (base "/",
+        # backend named "backend"). Both are baked in at build time, so they have
+        # to be passed here rather than set as runtime environment.
+        #
+        # API_UPSTREAM is not cosmetic: nginx resolves proxy_pass hostnames when
+        # it loads its config, so the default "backend" — a name that does not
+        # exist on this network — stops the container from starting at all.
+        VITE_BASE: /hr/
+        API_UPSTREAM: hr-api:8000
     networks: [gorilla]
     depends_on:
       hr-api:
