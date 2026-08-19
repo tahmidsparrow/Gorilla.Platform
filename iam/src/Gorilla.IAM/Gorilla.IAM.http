@@ -1,0 +1,6 @@
+@Gorilla.IAM_HostAddress = http://localhost:8100
+
+GET {{Gorilla.IAM_HostAddress}}/health
+Accept: application/json
+
+###

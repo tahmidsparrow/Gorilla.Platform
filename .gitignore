@@ -1,1 +1,6 @@
 deploy/.env
+
+# .NET build output (iam/)
+bin/
+obj/
+*.user

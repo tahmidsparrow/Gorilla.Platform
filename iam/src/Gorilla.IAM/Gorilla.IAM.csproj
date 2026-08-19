@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <!--
+      net9.0, not net10.0, despite the .NET 10 SDK: OpenIddict.EntityFrameworkCore
+      7.6.0 ships a separate dependency group per TFM, and its net10.0 group pins
+      Microsoft.EntityFrameworkCore.Relational 10.0.10 — but Pomelo.EntityFrameworkCore.MySql
+      has no release supporting EF Core 10 yet (caps at 9.0.0, requiring
+      EFCore.Relational <= 9.0.999). Targeting net9.0 instead makes NuGet resolve
+      OpenIddict's net9.0 dependency group (EFCore.Relational 9.0.18), which both
+      packages agree on. RollForward lets this still build and run under the
+      installed .NET 10 SDK/runtime with no net9.0 runtime installed separately.
+      Revisit once Pomelo publishes an EF Core 10-compatible release.
+    -->
+    <TargetFramework>net9.0</TargetFramework>
+    <RollForward>LatestMajor</RollForward>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BCrypt.Net-Next" Version="4.0.3" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.19" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="9.0.0">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="OpenIddict.AspNetCore" Version="7.6.0" />
+    <PackageReference Include="OpenIddict.EntityFrameworkCore" Version="7.6.0" />
+    <PackageReference Include="Pomelo.EntityFrameworkCore.MySql" Version="9.0.0" />
+  </ItemGroup>
+
+</Project>
