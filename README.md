@@ -1,4 +1,4 @@
-# gorilla-platform
+# Gorilla.Platform
 
 Shared infrastructure for the Gorilla estate (GorillaHR + Recruitment.Gorilla):
 the Docker Compose topology and nginx gateway that put both apps under one

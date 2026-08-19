@@ -15,10 +15,10 @@ jobs:
   smoke:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout gorilla-platform
+      - name: Checkout Gorilla.Platform
         uses: actions/checkout@v4
         with:
-          path: gorilla-platform
+          path: Gorilla.Platform
 
       # Sibling layout matches deploy/compose.yaml's relative build contexts
       # (../../GorillaHR, ../../Recruitment.Gorilla) — see deploy/README.md.
@@ -39,7 +39,7 @@ jobs:
           path: Recruitment.Gorilla
 
       - name: Write deploy/.env
-        working-directory: gorilla-platform/deploy
+        working-directory: Gorilla.Platform/deploy
         run: |
           cat > .env <<'EOF'
           MYSQL_ROOT_PASSWORD=ci-root-pw
@@ -52,7 +52,7 @@ jobs:
           EOF
 
       - name: Build and start the stack
-        working-directory: gorilla-platform/deploy
+        working-directory: Gorilla.Platform/deploy
         run: docker compose up -d --build
 
       - name: Wait for the gateway
@@ -95,10 +95,10 @@ jobs:
 
       - name: Dump logs on failure
         if: failure()
-        working-directory: gorilla-platform/deploy
+        working-directory: Gorilla.Platform/deploy
         run: docker compose logs
 
       - name: Tear down
         if: always()
-        working-directory: gorilla-platform/deploy
+        working-directory: Gorilla.Platform/deploy
         run: docker compose down -v
