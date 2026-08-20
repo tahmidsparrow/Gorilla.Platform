@@ -36,13 +36,13 @@ public class ConsumerAppSeederTests : IDisposable
     }
 
     [Fact]
-    public async Task Seeds_both_apps_with_their_full_role_vocabulary()
+    public async Task Seeds_all_apps_with_their_full_role_vocabulary()
     {
         await ConsumerAppSeeder.SeedAsync(_db);
 
         var apps = await _db.ConsumerApps.Include(a => a.Roles).ToListAsync();
 
-        Assert.Equal(2, apps.Count);
+        Assert.Equal(3, apps.Count);
         var hr = apps.Single(a => a.Key == "hr");
         Assert.Equal(["Employee", "Line Manager", "HR", "Admin"], hr.Roles.Select(r => r.Role));
     }
@@ -53,8 +53,8 @@ public class ConsumerAppSeederTests : IDisposable
         await ConsumerAppSeeder.SeedAsync(_db);
         await ConsumerAppSeeder.SeedAsync(_db);
 
-        Assert.Equal(2, await _db.ConsumerApps.CountAsync());
-        Assert.Equal(8, await _db.ConsumerAppRoles.CountAsync()); // 4 + 4
+        Assert.Equal(3, await _db.ConsumerApps.CountAsync());
+        Assert.Equal(9, await _db.ConsumerAppRoles.CountAsync()); // 4 + 4 + 1
     }
 
     [Fact]

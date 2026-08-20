@@ -12,9 +12,9 @@ namespace Gorilla.IAM.Tests;
 public class ConsumerAppSeedDataTests
 {
     [Fact]
-    public void Defines_exactly_hr_and_ats()
+    public void Defines_exactly_hr_ats_and_iam()
     {
-        Assert.Equal(["hr", "ats"], ConsumerAppSeedData.Apps.Select(a => a.Key));
+        Assert.Equal(["hr", "ats", "iam"], ConsumerAppSeedData.Apps.Select(a => a.Key));
     }
 
     [Fact]
@@ -29,5 +29,15 @@ public class ConsumerAppSeedDataTests
     {
         var ats = ConsumerAppSeedData.Apps.Single(a => a.Key == "ats");
         Assert.Equal(["SuperAdmin", "Admin", "Recruiter", "Interviewer"], ats.Roles);
+    }
+
+    /// <summary>The break-glass console's own access check (spec section 3.1:
+    /// "gated on a dedicated iam:admin grant") depends on this row and role
+    /// existing — see BreakGlassAuthenticator.</summary>
+    [Fact]
+    public void IAM_registers_itself_as_a_consumer_app_with_an_admin_role()
+    {
+        var iam = ConsumerAppSeedData.Apps.Single(a => a.Key == "iam");
+        Assert.Equal(["admin"], iam.Roles);
     }
 }

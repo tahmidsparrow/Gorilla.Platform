@@ -69,11 +69,47 @@ pins EF Core 10, its `net9.0` group pins EF Core 9. Targeting `net9.0` (with
 `RollForward: LatestMajor`) makes NuGet resolve the dependency group that
 actually agrees with Pomelo. Revisit once Pomelo catches up.
 
+## Break-glass admin console
+
+`/console` — spec section 3.1: "list subjects, toggle grants, deactivate,"
+gated on a dedicated `iam:admin` grant. Authenticates directly against
+Subject/Credential/RoleGrant (`Console/BreakGlassAuthenticator.cs`) via a
+separate cookie scheme — deliberately **not** OpenIddict's own
+authorization-code flow, since a break-glass path that only works when the
+rest of the OIDC machinery also works isn't actually break-glass.
+
+The bootstrap problem — the console can only grant `iam:admin` through a
+form that itself requires `iam:admin` to reach — is closed by
+`Iam:BootstrapAdminEmail`: on startup, if no one holds the grant yet, it's
+given once to that email (matching RG's own `Auth:SeedAdminEmail` pattern).
+The subject must already exist first — run the import tool, or create one
+some other way.
+
+```bash
+cd src/Gorilla.IAM
+ConnectionStrings__DefaultConnection="..." Iam__BootstrapAdminEmail="you@example.com" dotnet run
+# -> http://localhost:8100/console/login
+```
+
+Verified against a real MySQL database end to end, not just unit tests:
+bootstrap grant landing, login (cookie issued, correct redirect), the
+dashboard rendering real imported subjects, granting and revoking a role
+(with the granting admin's subject ID persisted), deactivate/reactivate,
+a non-admin's correct password being rejected with the same generic message
+a wrong password gets, and logout actually invalidating the session
+(dashboard 200 before, 302 after). One real bug this caught: calling
+`RequireAuthorization()` directly on the `/console` route group applied it
+retroactively to every route already mapped on that group, including
+`/console/login` itself — an unbreakable redirect loop. Fixed with a nested
+`MapGroup("")` for the protected routes only; see the comment in
+`ConsoleEndpoints.cs`.
+
 ## What's not here yet
 
 - No Dockerfile, no compose service — see the top-level README.
-- No login/consent UI, no registered OpenIddict clients, no break-glass
-  admin console — separate P1 deliverables per the roadmap.
+- No OIDC login/consent UI, no registered OpenIddict clients for other
+  apps to actually use yet — the break-glass console above authenticates
+  itself directly and doesn't need either.
 - Endpoint URL generation behind the eventual `/iam/` gateway prefix is an
   open question — see the `KNOWN GAP` comment in `Program.cs`. Don't trust
   the discovery document's URLs once a gateway route exists until that's

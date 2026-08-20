@@ -1,3 +1,4 @@
+using Gorilla.IAM.Console;
 using Gorilla.IAM.Data;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
@@ -24,6 +25,25 @@ var serverVersion = new MySqlServerVersion(new Version(9, 0, 0));
 
 builder.Services.AddDbContext<IamDbContext>(options =>
     options.UseMySql(connStr, serverVersion));
+
+builder.Services.AddScoped<BreakGlassAuthenticator>();
+builder.Services.AddScoped<SubjectAdminService>();
+
+// A separate, named cookie scheme for the break-glass console — never the
+// default scheme, and never touched by OpenIddict's own AddValidation()
+// below. Deliberately does not depend on OpenIddict at all: see
+// BreakGlassAuthenticator's class doc for why a break-glass path must not
+// share fate with the machinery it exists to work around.
+builder.Services.AddAuthentication()
+    .AddCookie(ConsoleAuth.Scheme, options =>
+    {
+        options.Cookie.Name = "gorilla_iam_console";
+        options.LoginPath = "/console/login";
+        options.AccessDeniedPath = "/console/login";
+        options.ExpireTimeSpan = TimeSpan.FromMinutes(60);
+        options.SlidingExpiration = true;
+    });
+builder.Services.AddAuthorization();
 
 builder.Services
     .AddOpenIddict()
@@ -132,6 +152,10 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
+app.UseAuthentication();
+app.UseAuthorization();
+app.MapConsoleEndpoints();
+
 // Liveness only — this service owns no other apps' health, so unlike HR's
 // /api/health this does not aggregate anything. No /api prefix: everything
 // this service exposes is either an OpenIddict /connect/* endpoint or its
@@ -152,6 +176,16 @@ using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<Gorilla.IAM.Data.IamDbContext>();
     await Gorilla.IAM.Data.Seeding.ConsumerAppSeeder.SeedAsync(db);
+
+    // Closes the break-glass console's own bootstrap problem: the console
+    // can only grant iam:admin through a form that itself requires
+    // iam:admin to reach. Grants it once, to whoever Iam:BootstrapAdminEmail
+    // names, the same "seed the first admin from config" idiom RG itself
+    // uses (Program.cs, Auth:SeedAdminEmail) — see BootstrapAdminSeeder.
+    var bootstrapWarning = await Gorilla.IAM.Data.Seeding.BootstrapAdminSeeder.SeedAsync(
+        db, builder.Configuration["Iam:BootstrapAdminEmail"]);
+    if (bootstrapWarning is not null)
+        app.Logger.LogWarning("{Warning}", bootstrapWarning);
 }
 
 app.Run();
