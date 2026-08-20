@@ -1,5 +1,6 @@
 using Gorilla.IAM.Data.Entities;
 using Microsoft.EntityFrameworkCore;
+using OpenIddict.EntityFrameworkCore.Models;
 
 namespace Gorilla.IAM.Data;
 
@@ -93,5 +94,43 @@ public class IamDbContext(DbContextOptions<IamDbContext> options) : DbContext(op
         // OpenIddict's own tables (applications, authorizations, scopes, tokens) —
         // separate from consumer_apps by design; see the class-level doc comment.
         modelBuilder.UseOpenIddict();
+
+        // OpenIddict's default Id/reference columns are varchar(255) — fine
+        // under SQL Server's index-key budget (nvarchar counts 2 bytes/char),
+        // not under MySQL's: utf8mb4 counts 4 bytes/char, so
+        // IX_OpenIddictTokens_ApplicationId_Status_Subject_Type alone
+        // ((255+50+255+50) * 4 = 2440... plus per-column overhead) exceeds
+        // MySQL's 3072-byte max key length. Not a hypothetical — this failed
+        // running `dotnet ef database update` against a real MySQL 9 server.
+        // OpenIddict's own IDs are GUID strings (36 chars); 100 is a safety
+        // margin, applied uniformly to primary keys and the columns that
+        // reference or accompany them so every composite index OpenIddict
+        // defines stays under the byte budget and FK/PK widths stay matched.
+        modelBuilder.Entity<OpenIddictEntityFrameworkCoreApplication>(entity =>
+        {
+            entity.Property(a => a.Id).HasMaxLength(100);
+        });
+
+        modelBuilder.Entity<OpenIddictEntityFrameworkCoreAuthorization>(entity =>
+        {
+            entity.Property(a => a.Id).HasMaxLength(100);
+            // ApplicationId is a shadow FK property behind the Application
+            // navigation, not a direct member of this class — hence the
+            // string-keyed Property<T>() overload rather than a lambda.
+            entity.Property<string>("ApplicationId").HasMaxLength(100);
+            entity.Property(a => a.Status).HasMaxLength(50);
+            entity.Property(a => a.Subject).HasMaxLength(100);
+            entity.Property(a => a.Type).HasMaxLength(50);
+        });
+
+        modelBuilder.Entity<OpenIddictEntityFrameworkCoreToken>(entity =>
+        {
+            entity.Property(t => t.Id).HasMaxLength(100);
+            entity.Property<string>("ApplicationId").HasMaxLength(100);
+            entity.Property<string>("AuthorizationId").HasMaxLength(100);
+            entity.Property(t => t.Status).HasMaxLength(50);
+            entity.Property(t => t.Subject).HasMaxLength(100);
+            entity.Property(t => t.Type).HasMaxLength(50);
+        });
     }
 }

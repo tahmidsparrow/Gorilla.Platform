@@ -138,6 +138,22 @@ app.UseHttpsRedirection();
 // own admin API, never a proxied domain API.
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
+// Idempotent — matches Recruitment.Gorilla's own startup-seed pattern
+// (Program.cs: seed the Super Admin "if !await db.Users.AnyAsync()").
+// Deliberately does NOT run migrations first: unlike RG, which migrates on
+// every boot, HR's split (a one-shot hr-migrate service, migrate-on-boot
+// disabled on the API containers via RUN_MIGRATIONS=0) is the intended model
+// here too — see the RUN_MIGRATIONS comment in GorillaHR's
+// docker-entrypoint.sh. No such split exists for this service yet (no
+// Dockerfile), so for now this seed step simply fails loudly if the
+// consumer_apps table doesn't exist — apply migrations by hand
+// (`dotnet ef database update`) before running.
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<Gorilla.IAM.Data.IamDbContext>();
+    await Gorilla.IAM.Data.Seeding.ConsumerAppSeeder.SeedAsync(db);
+}
+
 app.Run();
 
 // Required for WebApplicationFactory-based integration tests in
