@@ -1,2 +1,7 @@
 deploy/.env
 __pycache__/
+
+# .NET build output (iam/)
+bin/
+obj/
+*.user
