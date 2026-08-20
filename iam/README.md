@@ -27,10 +27,38 @@ No MySQL server is required to build, test, or generate migrations — see the
 run the service, since `IamDbContext` isn't backed by anything else yet.
 
 ```bash
-dotnet test                      # from iam/ — 14 tests, no DB needed
+dotnet test                      # from iam/ — 38 tests, no DB needed
 dotnet ef migrations add <Name>  # from src/Gorilla.IAM — needs a syntactically
                                   # valid connection string, not a live server
 ```
+
+## Importing subjects from HR and RG
+
+`tools/Gorilla.IAM.Import` reads both apps' user tables (read-only), plans
+what to import (`src/Gorilla.IAM/Import/ImportPlanner.cs` — HR's credential
+always wins when a person exists in both, per spec section 3.4), then either
+reports or writes:
+
+```bash
+cd tools/Gorilla.IAM.Import
+GORILLAHR_DB_PASSWORD=... RECRUITMENT_DB_PASSWORD=... dotnet run -- dry-run
+#   ^ same env var names as gorilla-platform/scripts/reconcile_users.py.
+#     Reports only — never writes to a database.
+
+ConnectionStrings__DefaultConnection="..." dotnet run -- apply
+#   ^ runs the same dry-run check first and refuses to write anything if it
+#     fails (verified: killed one manifest password on purpose, confirmed
+#     `apply` exits 1 and the subjects table stays at 0 rows). Re-running
+#     `apply` is safe — it updates an existing subject if the source hash
+#     changed, and touches nothing if it didn't.
+```
+
+The dry-run (spec section 9: "a dry-run import replaying known passwords
+before the real one") only proves as much as the passwords in
+`DryRunManifest.cs` are real and known — it defaults to this estate's seeded
+dev accounts, which is right for proving the tool works, not for a real
+cutover. A real dry-run needs a manifest of actual known-password test
+accounts instead.
 
 ## Why net9.0 under a .NET 10 SDK
 

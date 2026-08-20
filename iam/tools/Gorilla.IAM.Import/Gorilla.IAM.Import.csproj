@@ -1,0 +1,23 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- Must match Gorilla.IAM.csproj's TFM — see the comment there. -->
+    <TargetFramework>net9.0</TargetFramework>
+    <RollForward>LatestMajor</RollForward>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- HR and RG are not IamDbContext's databases — read directly via the
+         same MySqlConnector that Pomelo already pulls in, no EF model needed
+         for tables this project only ever reads once. -->
+    <PackageReference Include="MySqlConnector" Version="2.4.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Gorilla.IAM\Gorilla.IAM.csproj" />
+  </ItemGroup>
+
+</Project>
