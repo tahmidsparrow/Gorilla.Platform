@@ -14,5 +14,13 @@ public class Credential
     public CredentialAlgorithm Algorithm { get; set; }
     public string Hash { get; set; } = string.Empty;
 
+    /// <summary>Set whenever an admin resets this credential (never by the
+    /// subject's own password change). Spec section 3.2: "no token is
+    /// issued until the password changes" — the break-glass console applies
+    /// the same principle to its own session, not just the future OIDC
+    /// login page: a true here blocks everything except the change-password
+    /// form itself. See BreakGlassLoginGate.</summary>
+    public bool MustChangePassword { get; set; }
+
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 }

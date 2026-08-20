@@ -104,6 +104,38 @@ retroactively to every route already mapped on that group, including
 `MapGroup("")` for the protected routes only; see the comment in
 `ConsoleEndpoints.cs`.
 
+### Admin-initiated password reset
+
+The P2 blocker on the roadmap line: once Recruitment cuts over, a person
+whose old RG password stops working and who doesn't know their HR password
+(spec section 3.4's "one unsolvable case") has no self-service recovery
+(out of scope until P6 — needs email neither app has). The dashboard's
+"Reset password" column is the only way back in until then — an admin sets
+a temporary password (`SubjectAdminService.ResetPasswordAsync`), which
+flags `Credential.MustChangePassword`. No email is sent; communicating the
+temporary password is the admin's job, out of band.
+
+That flag gates the *console's own session*, not just a future OIDC flow —
+spec section 3.2's "no token is issued until the password changes,"
+applied here: logging in with a flagged credential returns an interim
+session with no `admin` role claim, so every dashboard route correctly
+denies it (`RequireRole`) and `AccessDeniedPath` sends it to
+`/console/change-password` instead of back to the login form. Completing
+the change (`BreakGlassAuthenticator.ChangePasswordAsync`, which
+re-verifies the temporary password rather than trusting the interim
+session alone) signs the session out entirely — sign in again with the new
+password, no upgrade-in-place. Password rules
+(`Auth/PasswordPolicy.cs`) are ported from GorillaHR's
+`password_policy_error`, cross-checked against real output from that
+function (byte length via UTF-8, not character count; CJK counts as a
+letter) before being trusted, the same discipline as `Pbkdf2PasswordHasher`.
+
+Verified end to end against real MySQL, including the two-request proof
+that actually matters: `AccessDeniedPath` really does route the interim
+session to `/console/change-password` (not a redirect loop back to the
+denied page), and a full sign-in with the *old* temporary password fails
+once the change completes while the *new* password reaches the dashboard.
+
 ## What's not here yet
 
 - No Dockerfile, no compose service — see the top-level README.

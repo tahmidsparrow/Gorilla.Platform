@@ -39,7 +39,14 @@ builder.Services.AddAuthentication()
     {
         options.Cookie.Name = "gorilla_iam_console";
         options.LoginPath = "/console/login";
-        options.AccessDeniedPath = "/console/login";
+        // Not "/console/login": the only two states a cookie from this
+        // scheme can be in are "full admin" (Role claim present) or "must
+        // change password" (no Role claim, set on MustChangePassword
+        // sign-in — see ConsoleEndpoints). AccessDenied only fires for an
+        // *authenticated* principal that fails a policy, so landing here
+        // always means the latter state; sending them anywhere else would
+        // be a dead end with no way to reach the one page that unblocks them.
+        options.AccessDeniedPath = "/console/change-password";
         options.ExpireTimeSpan = TimeSpan.FromMinutes(60);
         options.SlidingExpiration = true;
     });

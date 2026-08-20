@@ -1,3 +1,4 @@
+using Gorilla.IAM.Auth;
 using Gorilla.IAM.Data;
 using Gorilla.IAM.Data.Entities;
 using Microsoft.EntityFrameworkCore;
@@ -11,6 +12,12 @@ public enum GrantRoleResult
     Granted,
     AlreadyGranted,
     UnknownAppOrRole,
+}
+
+public enum ResetPasswordResult
+{
+    Reset,
+    PolicyViolation,
 }
 
 /// <summary>
@@ -88,5 +95,40 @@ public class SubjectAdminService(IamDbContext db)
 
         db.RoleGrants.Remove(grant);
         await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// Admin-initiated reset — the P2 blocker: after Recruitment cuts over
+    /// (spec section 3.2), a person locked out because their old RG password
+    /// stopped working and they don't know their HR one has no self-service
+    /// recovery (out of scope until P6, needs email). This is the only way
+    /// back in until then. Sets a temporary password chosen by the admin and
+    /// flags MustChangePassword — the subject cannot use the console for
+    /// anything except changing it on next login (BreakGlassAuthenticator).
+    /// No email is sent; communicating the temporary password is the admin's
+    /// job, out of band. There is no currentPassword to compare against
+    /// here — the admin does not know it either — so PasswordPolicy is
+    /// checked without that argument, unlike the subject's own later change.
+    /// </summary>
+    public async Task<ResetPasswordResult> ResetPasswordAsync(Guid subjectId, string newPassword, CancellationToken ct = default)
+    {
+        if (PasswordPolicy.Validate(newPassword) is not null)
+            return ResetPasswordResult.PolicyViolation;
+
+        var subject = await db.Subjects.Include(s => s.Credential).SingleOrDefaultAsync(s => s.Id == subjectId, ct)
+            ?? throw new KeyNotFoundException($"No subject {subjectId}.");
+
+        if (subject.Credential is null)
+        {
+            subject.Credential = new Credential { SubjectId = subjectId };
+            db.Credentials.Add(subject.Credential);
+        }
+
+        subject.Credential.Algorithm = CredentialAlgorithm.Bcrypt;
+        subject.Credential.Hash = BcryptPasswordHasher.Hash(newPassword);
+        subject.Credential.MustChangePassword = true;
+        subject.Credential.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+        return ResetPasswordResult.Reset;
     }
 }

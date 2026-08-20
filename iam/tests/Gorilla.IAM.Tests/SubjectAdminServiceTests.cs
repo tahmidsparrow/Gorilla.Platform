@@ -160,4 +160,52 @@ public class SubjectAdminServiceTests : IDisposable
     {
         await Assert.ThrowsAsync<KeyNotFoundException>(() => _sut.SetActiveAsync(Guid.NewGuid(), false));
     }
+
+    [Fact]
+    public async Task ResetPasswordAsync_sets_a_bcrypt_credential_and_flags_MustChangePassword()
+    {
+        var subject = await SeedSubjectAsync();
+
+        var result = await _sut.ResetPasswordAsync(subject.Id, "newValidPass2");
+
+        Assert.Equal(ResetPasswordResult.Reset, result);
+        var credential = await _db.Credentials.SingleAsync(c => c.SubjectId == subject.Id);
+        Assert.Equal(CredentialAlgorithm.Bcrypt, credential.Algorithm);
+        Assert.True(credential.MustChangePassword);
+        Assert.True(BcryptPasswordHasher.Verify("newValidPass2", credential.Hash));
+    }
+
+    /// <summary>A PBKDF2 credential (RG-only person) resets to bcrypt too —
+    /// the reset always writes fresh, never preserves the old algorithm.</summary>
+    [Fact]
+    public async Task ResetPasswordAsync_converts_a_pbkdf2_credential_to_bcrypt()
+    {
+        var subject = new Subject { Email = "legacy@example.com", Name = "L", IsActive = true };
+        subject.Credential = new Credential { SubjectId = subject.Id, Algorithm = CredentialAlgorithm.Pbkdf2Sha256, Hash = "100000.x.y" };
+        _db.Subjects.Add(subject);
+        await _db.SaveChangesAsync();
+
+        await _sut.ResetPasswordAsync(subject.Id, "newValidPass2");
+
+        var credential = await _db.Credentials.SingleAsync(c => c.SubjectId == subject.Id);
+        Assert.Equal(CredentialAlgorithm.Bcrypt, credential.Algorithm);
+    }
+
+    [Fact]
+    public async Task ResetPasswordAsync_rejects_a_password_that_fails_policy_and_leaves_the_credential_untouched()
+    {
+        var subject = await SeedSubjectAsync();
+        var originalHash = (await _db.Credentials.SingleAsync(c => c.SubjectId == subject.Id)).Hash;
+
+        var result = await _sut.ResetPasswordAsync(subject.Id, "short1");
+
+        Assert.Equal(ResetPasswordResult.PolicyViolation, result);
+        Assert.Equal(originalHash, (await _db.Credentials.SingleAsync(c => c.SubjectId == subject.Id)).Hash);
+    }
+
+    [Fact]
+    public async Task ResetPasswordAsync_throws_for_an_unknown_subject()
+    {
+        await Assert.ThrowsAsync<KeyNotFoundException>(() => _sut.ResetPasswordAsync(Guid.NewGuid(), "newValidPass2"));
+    }
 }

@@ -55,10 +55,26 @@ public static class ConsoleHtml
             """);
     }
 
+    public static string ChangePasswordPage(string? error = null)
+    {
+        var errorHtml = error is null ? "" : $"""<p class="error">{E(error)}</p>""";
+        return Page("Change password", $"""
+            <p>{errorHtml}</p>
+            <form method="post" action="/console/change-password">
+              <p><label>Current password <input type="password" name="currentPassword" required autofocus></label></p>
+              <p><label>New password <input type="password" name="newPassword" required></label></p>
+              <p><label>Confirm new password <input type="password" name="confirmPassword" required></label></p>
+              <button type="submit">Change password</button>
+            </form>
+            <form method="post" action="/console/logout"><button type="submit">Sign out instead</button></form>
+            """);
+    }
+
     public static string Dashboard(
         IReadOnlyList<SubjectSummary> subjects,
         IReadOnlyList<(string AppKey, string[] Roles)> grantableRoles,
-        string signedInAsEmail)
+        string signedInAsEmail,
+        bool resetFailed = false)
     {
         var roleOptions = string.Join("", grantableRoles.SelectMany(a =>
             a.Roles.Select(r => $"""<option value="{E(a.AppKey)}:{E(r)}">{E(a.AppKey)}:{E(r)}</option>""")));
@@ -94,16 +110,32 @@ public static class ConsoleHtml
                       <button type="submit">{toggleLabel}</button>
                     </form>
                   </td>
+                  <td>
+                    <form class="inline" method="post" action="/console/subjects/{s.Id}/reset-password">
+                      <input type="password" name="newPassword" placeholder="temporary password" required>
+                      <button type="submit" title="Sets this password and forces a change on next sign-in">Reset password</button>
+                    </form>
+                  </td>
                 </tr>
                 """;
         }));
 
+        var resetFailedHtml = resetFailed
+            ? """<p class="error">Reset failed: the password did not meet the policy (at least 8 characters, at most 72 bytes, a letter and a digit).</p>"""
+            : "";
+
         return Page("Subjects", $"""
-            <p>Signed in as {E(signedInAsEmail)} — <form class="inline" method="post" action="/console/logout"><button type="submit">Sign out</button></form></p>
+            <p>Signed in as {E(signedInAsEmail)} —
+              <form class="inline" method="post" action="/console/logout"><button type="submit">Sign out</button></form> ·
+              <a href="/console/change-password">Change my password</a></p>
+            {resetFailedHtml}
             <table>
-              <tr><th>Email</th><th>Name</th><th>Status</th><th>Grants</th><th>Grant a role</th><th></th></tr>
+              <tr><th>Email</th><th>Name</th><th>Status</th><th>Grants</th><th>Grant a role</th><th></th><th>Reset password</th></tr>
               {rows}
             </table>
+            <p>Resetting a password does not send an email — communicate the
+            temporary password to the person out of band. They must change it
+            on their next sign-in.</p>
             """);
     }
 }
