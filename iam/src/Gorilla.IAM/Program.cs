@@ -1,7 +1,9 @@
 using Gorilla.IAM.Console;
 using Gorilla.IAM.Data;
+using Gorilla.IAM.Oidc;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
+using OpenIddict.Abstractions;
 using static OpenIddict.Abstractions.OpenIddictConstants;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -162,6 +164,7 @@ app.UseHttpsRedirection();
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapConsoleEndpoints();
+app.MapOidcEndpoints();
 
 // Liveness only — this service owns no other apps' health, so unlike HR's
 // /api/health this does not aggregate anything. No /api prefix: everything
@@ -193,6 +196,15 @@ using (var scope = app.Services.CreateScope())
         db, builder.Configuration["Iam:BootstrapAdminEmail"]);
     if (bootstrapWarning is not null)
         app.Logger.LogWarning("{Warning}", bootstrapWarning);
+
+    // P2 increment 1: registers Recruitment.Gorilla's SPA as an OpenIddict
+    // client — a different table from ConsumerApps above; see
+    // OpenIddictClientSeeder's doc comment for why both exist.
+    var applicationManager = scope.ServiceProvider.GetRequiredService<IOpenIddictApplicationManager>();
+    var clientWarning = await Gorilla.IAM.Data.Seeding.OpenIddictClientSeeder.SeedAsync(
+        applicationManager, builder.Configuration["Iam:AtsClientRedirectUris"]);
+    if (clientWarning is not null)
+        app.Logger.LogWarning("{Warning}", clientWarning);
 }
 
 app.Run();

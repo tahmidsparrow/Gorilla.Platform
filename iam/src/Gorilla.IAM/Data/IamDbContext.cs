@@ -120,7 +120,14 @@ public class IamDbContext(DbContextOptions<IamDbContext> options) : DbContext(op
             entity.Property<string>("ApplicationId").HasMaxLength(100);
             entity.Property(a => a.Status).HasMaxLength(50);
             entity.Property(a => a.Subject).HasMaxLength(100);
-            entity.Property(a => a.Type).HasMaxLength(50);
+            // 50 (the original guess) was too narrow for what OpenIddict
+            // actually writes here — confirmed the hard way: driving a real
+            // authorization request against MySQL failed with "Data too
+            // long for column 'Type'". 256 is still far inside the index
+            // byte budget (see the comment above this block — 768 chars
+            // total across all four columns fits under MySQL's 3072-byte
+            // limit; 100+50+100+256 = 506 leaves plenty of margin).
+            entity.Property(a => a.Type).HasMaxLength(256);
         });
 
         modelBuilder.Entity<OpenIddictEntityFrameworkCoreToken>(entity =>
@@ -130,7 +137,7 @@ public class IamDbContext(DbContextOptions<IamDbContext> options) : DbContext(op
             entity.Property<string>("AuthorizationId").HasMaxLength(100);
             entity.Property(t => t.Status).HasMaxLength(50);
             entity.Property(t => t.Subject).HasMaxLength(100);
-            entity.Property(t => t.Type).HasMaxLength(50);
+            entity.Property(t => t.Type).HasMaxLength(256); // see the comment on the Authorization entity above
         });
     }
 }
