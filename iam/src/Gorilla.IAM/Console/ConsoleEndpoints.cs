@@ -27,20 +27,27 @@ public static class ConsoleEndpoints
     {
         var console = app.MapGroup("/console");
 
-        console.MapGet("/login", () => Results.Content(ConsoleHtml.LoginPage(), "text/html"));
+        console.MapGet("/login", (HttpContext http) =>
+            Results.Content(ConsoleHtml.LoginPage(returnUrl: SafeLocalReturnUrl(http.Request.Query["ReturnUrl"])), "text/html"));
 
         console.MapPost("/login", async (HttpContext http, BreakGlassAuthenticator auth) =>
         {
             var form = await http.Request.ReadFormAsync();
             var email = form["email"].ToString();
             var password = form["password"].ToString();
+            var returnUrl = SafeLocalReturnUrl(form["ReturnUrl"]);
 
             var result = await auth.AuthenticateAsync(email, password);
             switch (result)
             {
                 case LoginResult.Success success:
                     await SignInAsync(http, success.SubjectId, success.Email, success.Name, isFullAdmin: true);
-                    return Results.Redirect("/console");
+                    // Honor ReturnUrl (e.g. OidcEndpoints' /connect/authorize challenge)
+                    // when present and safe, so a real browser sign-in actually
+                    // continues the flow that triggered the login instead of always
+                    // landing on the dashboard. Confirmed the hard way: without this,
+                    // a real OIDC login through a real browser dead-ended here.
+                    return Results.Redirect(returnUrl ?? "/console");
 
                 case LoginResult.MustChangePassword pending:
                     // No Role claim — the "authorized" group below requires
@@ -48,7 +55,9 @@ public static class ConsoleEndpoints
                     // except /console/change-password (and /console/logout).
                     // See AccessDeniedPath in Program.cs for the other half
                     // of this: an authenticated-but-role-denied request lands
-                    // there, not back at the login form.
+                    // there, not back at the login form. Deliberately ignores
+                    // ReturnUrl — spec 3.2: no token is issued until the
+                    // password changes, so an OIDC flow can't complete from here.
                     await SignInAsync(http, pending.SubjectId, pending.Email, pending.Name, isFullAdmin: false);
                     return Results.Redirect("/console/change-password");
 
@@ -57,7 +66,7 @@ public static class ConsoleEndpoints
                     // LoginFailureReason — an unauthenticated caller must not
                     // be able to distinguish "wrong password" from "correct
                     // password, not an admin" from "no such account."
-                    return Results.Content(ConsoleHtml.LoginPage("Invalid email or password."), "text/html");
+                    return Results.Content(ConsoleHtml.LoginPage("Invalid email or password.", returnUrl), "text/html");
             }
         });
 
@@ -172,6 +181,14 @@ public static class ConsoleEndpoints
             return Results.Redirect(result == ResetPasswordResult.PolicyViolation ? "/console?resetFailed=1" : "/console");
         });
     }
+
+    /// <summary>Open-redirect guard: a ReturnUrl is only honored when it's a same-app
+    /// relative path. "/connect/authorize?..." (this cookie scheme's own LoginPath
+    /// challenge target) qualifies; an absolute or protocol-relative URL does not.</summary>
+    private static string? SafeLocalReturnUrl(string? returnUrl) =>
+        !string.IsNullOrEmpty(returnUrl) && returnUrl.StartsWith('/') && !returnUrl.StartsWith("//")
+            ? returnUrl
+            : null;
 
     private static async Task SignInAsync(HttpContext http, Guid subjectId, string email, string name, bool isFullAdmin)
     {

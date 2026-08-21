@@ -100,14 +100,6 @@ public class OidcFlowTests
         // real browser.
         var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
 
-        var loginResponse = await client.PostAsync("/console/login",
-            new FormUrlEncodedContent(new Dictionary<string, string>
-            {
-                ["email"] = adminEmail,
-                ["password"] = adminPassword,
-            }));
-        Assert.Equal(HttpStatusCode.Redirect, loginResponse.StatusCode);
-
         var (verifier, challenge) = GeneratePkcePair();
         var authorizeUrl = "/connect/authorize" +
             $"?client_id={ClientId}" +
@@ -118,7 +110,36 @@ public class OidcFlowTests
             "&code_challenge_method=S256" +
             "&state=test-state";
 
-        var authorizeResponse = await client.GetAsync(authorizeUrl);
+        // Deliberately NOT logging in first: a real browser hits /connect/authorize
+        // with no console session yet, gets challenged to /console/login?ReturnUrl=...,
+        // and the login POST has to actually honor that ReturnUrl to land back here —
+        // logging in first (the original shape of this test) never exercised that
+        // path at all, and missed a real bug: the login handler ignored ReturnUrl
+        // entirely and always redirected to /console, dead-ending every real
+        // first-time browser login. Confirmed only by driving this through an
+        // actual browser (Increment 3) — see ConsoleEndpoints.cs's SafeLocalReturnUrl.
+        var challengeResponse = await client.GetAsync(authorizeUrl);
+        Assert.Equal(HttpStatusCode.Redirect, challengeResponse.StatusCode);
+        var challengeLocation = challengeResponse.Headers.Location
+            ?? throw new InvalidOperationException("Unauthenticated authorize response carried no redirect Location.");
+        Assert.Equal("/console/login", challengeLocation.AbsolutePath);
+        var returnUrl = System.Web.HttpUtility.ParseQueryString(challengeLocation.Query)["ReturnUrl"]
+            ?? throw new InvalidOperationException($"No 'ReturnUrl' on the login challenge: {challengeLocation}");
+
+        var loginResponse = await client.PostAsync("/console/login",
+            new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["email"] = adminEmail,
+                ["password"] = adminPassword,
+                ["ReturnUrl"] = returnUrl,
+            }));
+        Assert.Equal(HttpStatusCode.Redirect, loginResponse.StatusCode);
+        var loginRedirect = loginResponse.Headers.Location
+            ?? throw new InvalidOperationException("Login response carried no redirect Location.");
+        var loginRedirectPathAndQuery = loginRedirect.IsAbsoluteUri ? loginRedirect.PathAndQuery : loginRedirect.ToString();
+        Assert.Equal(returnUrl, loginRedirectPathAndQuery);
+
+        var authorizeResponse = await client.GetAsync(loginRedirect);
         Assert.Equal(HttpStatusCode.Redirect, authorizeResponse.StatusCode);
         var location = authorizeResponse.Headers.Location
             ?? throw new InvalidOperationException("Authorize response carried no redirect Location.");
@@ -146,15 +167,25 @@ public class OidcFlowTests
         Assert.False(string.IsNullOrEmpty(idToken));
         Assert.False(string.IsNullOrEmpty(refreshToken));
 
-        // The id_token is a plain signed JWT (unlike the encrypted access
-        // token) — decode its payload directly and check the claims this
-        // increment's /connect/authorize handler is responsible for shaping
-        // correctly: the real subject id, not a placeholder.
+        // The id_token is a plain signed JWT — decode its payload directly and check
+        // the claims this increment's /connect/authorize handler is responsible for
+        // shaping correctly: the real subject id, not a placeholder.
         var claims = DecodeJwtPayload(idToken!);
         Assert.Equal(subjectId.ToString(), claims.GetProperty("sub").GetString());
         Assert.Equal(adminEmail, claims.GetProperty("email").GetString());
         Assert.Equal("OIDC Flow Test Admin", claims.GetProperty("name").GetString());
         Assert.Equal(ClientId, claims.GetProperty("aud").GetString());
+
+        // The access token must ALSO be a plain signed JWT (3 dot-separated segments),
+        // not OpenIddict's default encrypted JWE (5 segments) — a consumer like RG
+        // validates this one directly via generic JwtBearer/JWKS, which cannot decrypt
+        // a JWE at all. Confirmed the hard way: without Program.cs's
+        // DisableAccessTokenEncryption(), RG rejected every real access token with
+        // WWW-Authenticate: Bearer error="invalid_token".
+        Assert.Equal(3, accessToken!.Split('.').Length);
+        var accessClaims = DecodeJwtPayload(accessToken);
+        Assert.Equal(subjectId.ToString(), accessClaims.GetProperty("sub").GetString());
+        Assert.Equal(ClientId, accessClaims.GetProperty("aud").GetString());
 
         // The refresh_token grant this client was registered with is also
         // exercised for real, not assumed to work because authorization_code did.

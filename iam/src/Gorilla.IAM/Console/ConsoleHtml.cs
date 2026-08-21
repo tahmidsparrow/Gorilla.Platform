@@ -40,14 +40,23 @@ public static class ConsoleHtml
         </body></html>
         """;
 
-    public static string LoginPage(string? error = null)
+    /// <param name="returnUrl">Where to land after a successful full-admin sign-in —
+    /// set when the cookie scheme's own Challenge() (e.g. OidcEndpoints' /connect/authorize
+    /// handler) redirected here with ?ReturnUrl=..., so the console can hand the caller
+    /// back to whatever triggered the challenge instead of always landing on /console.
+    /// Carried as a hidden field, not left in the query string: the form's action has
+    /// no query string of its own, so a query-string-only ReturnUrl would be silently
+    /// dropped on submit.</param>
+    public static string LoginPage(string? error = null, string? returnUrl = null)
     {
         var errorHtml = error is null ? "" : $"""<p class="error">{E(error)}</p>""";
+        var returnUrlHtml = returnUrl is null ? "" : $"""<input type="hidden" name="ReturnUrl" value="{E(returnUrl)}">""";
         return Page("Break-glass sign-in", $"""
             <p>Bootstrap/break-glass console — spec section 3.1. Requires an
             <code>iam:admin</code> grant.</p>
             {errorHtml}
             <form method="post" action="/console/login">
+              {returnUrlHtml}
               <p><label>Email <input type="email" name="email" required autofocus></label></p>
               <p><label>Password <input type="password" name="password" required></label></p>
               <button type="submit">Sign in</button>

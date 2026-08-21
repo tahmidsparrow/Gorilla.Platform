@@ -77,6 +77,20 @@ builder.Services
             .RequireProofKeyForCodeExchange()
             .AllowRefreshTokenFlow();
 
+        // OpenIddict encrypts access tokens by default (JWE) — fine for validating
+        // its own tokens via AddValidation().UseLocalServer() below, but incompatible
+        // with a plain external resource server's JwtBearer handler, which expects a
+        // signed-only JWT (JWS) it can verify via this server's own JWKS. That is
+        // this token design's entire point (spec section 3.2: "RS256... consumers
+        // discover everything from /.well-known/openid-configuration", section 2:
+        // "Both apps validate offline") — an encrypted token can't be validated
+        // offline by a generic library without also sharing this service's private
+        // encryption key, which would defeat asymmetric signing entirely. Confirmed
+        // the hard way: RG's JwtBearer rejected an IAM access token with
+        // WWW-Authenticate: Bearer error="invalid_token" — decoding its header
+        // showed {"alg":"RSA-OAEP","enc":"A256CBC-HS512"}, a JWE, not a JWS.
+        options.DisableAccessTokenEncryption();
+
         options.RegisterScopes(
             Scopes.OpenId,
             Scopes.Email,
