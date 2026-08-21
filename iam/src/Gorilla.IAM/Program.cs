@@ -135,6 +135,16 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
     options.KnownProxies.Clear();
 });
 
+// P2 increment 3: RG's frontend calls /connect/token and /.well-known/* directly
+// from the browser (oidc-client-ts) — a genuine cross-origin request the browser
+// blocks without this, unlike /connect/authorize which is a full-page redirect and
+// needs nothing here. Same config-driven pattern as RG's own backend's
+// AllowedOrigins/AddCors (Recruitment.Gorilla.API/Program.cs) — empty by default,
+// same reasoning as Iam:Issuer/BootstrapAdminEmail: "not configured yet" is valid.
+var allowedOrigins = builder.Configuration.GetSection("Iam:AllowedOrigins").Get<string[]>() ?? [];
+builder.Services.AddCors(opt =>
+    opt.AddDefaultPolicy(p => p.WithOrigins(allowedOrigins).AllowAnyHeader().AllowAnyMethod()));
+
 var app = builder.Build();
 
 // KNOWN GAP, deliberately not solved here: once the gateway has an actual
@@ -161,6 +171,7 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
+app.UseCors();
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapConsoleEndpoints();
