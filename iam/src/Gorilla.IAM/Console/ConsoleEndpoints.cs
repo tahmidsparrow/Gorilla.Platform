@@ -2,6 +2,7 @@ using System.Security.Claims;
 using Gorilla.IAM.Data;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace Gorilla.IAM.Console;
 
@@ -41,7 +42,7 @@ public static class ConsoleEndpoints
             switch (result)
             {
                 case LoginResult.Success success:
-                    await SignInAsync(http, success.SubjectId, success.Email, success.Name, isFullAdmin: true);
+                    await SignInAsync(http, success.SubjectId, success.Email, success.Name, isAdmin: success.IsAdmin);
                     // Honor ReturnUrl (e.g. OidcEndpoints' /connect/authorize challenge)
                     // when present and safe, so a real browser sign-in actually
                     // continues the flow that triggered the login instead of always
@@ -50,16 +51,19 @@ public static class ConsoleEndpoints
                     return Results.Redirect(returnUrl ?? "/console");
 
                 case LoginResult.MustChangePassword pending:
-                    // No Role claim — the "authorized" group below requires
-                    // RequireRole(admin), so this session can reach nothing
-                    // except /console/change-password (and /console/logout).
-                    // See AccessDeniedPath in Program.cs for the other half
-                    // of this: an authenticated-but-role-denied request lands
-                    // there, not back at the login form. Deliberately ignores
-                    // ReturnUrl — spec 3.2: no token is issued until the
-                    // password changes, so an OIDC flow can't complete from here.
-                    await SignInAsync(http, pending.SubjectId, pending.Email, pending.Name, isFullAdmin: false);
-                    return Results.Redirect("/console/change-password");
+                    // No Role claim and no admin grant needed here (see class doc —
+                    // Success can now happen for non-admins too) — the "authorized"
+                    // group below requires RequireRole(admin), so this session can
+                    // reach nothing except /console/change-password (and
+                    // /console/logout). See AccessDeniedPath in Program.cs. ReturnUrl
+                    // rides along (not ignored) so the OIDC flow that triggered this
+                    // login can still continue once the password is changed — spec
+                    // 3.2 just means no token is issued until then, not that the
+                    // flow has to restart from scratch.
+                    await SignInAsync(http, pending.SubjectId, pending.Email, pending.Name, isAdmin: false, mustChangePassword: true);
+                    return Results.Redirect(returnUrl is null
+                        ? "/console/change-password"
+                        : $"/console/change-password?ReturnUrl={Uri.EscapeDataString(returnUrl)}");
 
                 default:
                     // Deliberately the same generic message for every
@@ -68,7 +72,7 @@ public static class ConsoleEndpoints
                     // password, not an admin" from "no such account."
                     return Results.Content(ConsoleHtml.LoginPage("Invalid email or password.", returnUrl), "text/html");
             }
-        });
+        }).RequireRateLimiting("login");
 
         console.MapPost("/logout", async (HttpContext http) =>
         {
@@ -81,13 +85,32 @@ public static class ConsoleEndpoints
         // claim) has to be able to reach this even though it fails
         // RequireRole(admin) everywhere else. A full admin session can reach
         // it too (self-service rotation), since ChangePasswordAsync doesn't
-        // care which state the caller arrived from.
+        // care which state the caller arrived from. A regular non-admin
+        // session (also no Role claim, now that BreakGlassAuthenticator isn't
+        // admin-only) can reach the route too, but the handler itself turns
+        // them away — see its own comment just below.
         var authenticatedOnly = console.MapGroup("").RequireAuthorization(policy => policy
             .AddAuthenticationSchemes(ConsoleAuth.Scheme)
             .RequireAuthenticatedUser());
 
-        authenticatedOnly.MapGet("/change-password", () =>
-            Results.Content(ConsoleHtml.ChangePasswordPage(), "text/html"));
+        // Reachable by anyone authenticated (see the group's own comment above),
+        // but only actually useful for two cases: a pending forced reset
+        // (must_change_password claim), or an admin's own voluntary rotation
+        // (ConsoleHtml.Dashboard's "Change my password" link — ConsoleEndpoints'
+        // ChangePasswordAsync doesn't care which state the caller arrived from).
+        // Anyone else landing here — a non-admin, non-pending subject bounced by
+        // AccessDeniedPath after a role-denied request — gets told plainly that
+        // this area needs an iam:admin grant, not the password form.
+        authenticatedOnly.MapGet("/change-password", (HttpContext http) =>
+        {
+            var pending = http.User.HasClaim("must_change_password", "true");
+            var isAdmin = http.User.IsInRole(IamSelfConsumerApp.AdminRole);
+            if (!pending && !isAdmin)
+                return Results.Content(ConsoleHtml.AccessDeniedPage(), "text/html");
+
+            var returnUrl = SafeLocalReturnUrl(http.Request.Query["ReturnUrl"]);
+            return Results.Content(ConsoleHtml.ChangePasswordPage(returnUrl: returnUrl), "text/html");
+        });
 
         authenticatedOnly.MapPost("/change-password", async (HttpContext http, BreakGlassAuthenticator auth) =>
         {
@@ -95,10 +118,12 @@ public static class ConsoleEndpoints
             var currentPassword = form["currentPassword"].ToString();
             var newPassword = form["newPassword"].ToString();
             var confirmPassword = form["confirmPassword"].ToString();
+            var returnUrl = SafeLocalReturnUrl(form["ReturnUrl"]);
             var subjectId = Guid.Parse(http.User.FindFirstValue(ClaimTypes.NameIdentifier)!);
 
             if (newPassword != confirmPassword)
-                return Results.Content(ConsoleHtml.ChangePasswordPage("New password and confirmation do not match."), "text/html");
+                return Results.Content(
+                    ConsoleHtml.ChangePasswordPage("New password and confirmation do not match.", returnUrl), "text/html");
 
             var result = await auth.ChangePasswordAsync(subjectId, currentPassword, newPassword);
             if (result != ChangePasswordResult.Changed)
@@ -106,14 +131,18 @@ public static class ConsoleEndpoints
                 var message = result == ChangePasswordResult.WrongCurrentPassword
                     ? "Current password is incorrect."
                     : "New password does not meet the password policy (at least 8 characters, at most 72 bytes, a letter and a digit, different from the current password).";
-                return Results.Content(ConsoleHtml.ChangePasswordPage(message), "text/html");
+                return Results.Content(ConsoleHtml.ChangePasswordPage(message, returnUrl), "text/html");
             }
 
             // Sign out rather than upgrade the interim session in place — no
             // session survives a password change; sign in again with the new
             // password. Simpler and safer than reissuing claims mid-session.
+            // ReturnUrl rides through to the login page so a caller who arrived
+            // here via a pending OIDC flow (see the login handler above) isn't
+            // dropped back at the start of it after signing in again.
             await http.SignOutAsync(ConsoleAuth.Scheme);
-            return Results.Content(ConsoleHtml.LoginPage("Password changed. Sign in with your new password."), "text/html");
+            return Results.Content(
+                ConsoleHtml.LoginPage("Password changed. Sign in with your new password.", returnUrl), "text/html");
         });
 
         // A nested group, not RequireAuthorization() on `console` directly:
@@ -190,7 +219,14 @@ public static class ConsoleEndpoints
             ? returnUrl
             : null;
 
-    private static async Task SignInAsync(HttpContext http, Guid subjectId, string email, string name, bool isFullAdmin)
+    /// <param name="mustChangePassword">Marks the interim, forced-reset session
+    /// (spec 3.2: no token/session privileges until the password changes). Distinct
+    /// from "no Role claim" as a signal: once non-admins can also reach a normal,
+    /// non-pending Success (see BreakGlassAuthenticator's class doc), "no Role
+    /// claim" alone no longer means "must change password" — this claim is the
+    /// actual signal /console/change-password's GET handler branches on.</param>
+    private static async Task SignInAsync(
+        HttpContext http, Guid subjectId, string email, string name, bool isAdmin, bool mustChangePassword = false)
     {
         var claims = new List<Claim>
         {
@@ -198,8 +234,10 @@ public static class ConsoleEndpoints
             new(ClaimTypes.Email, email),
             new(ClaimTypes.Name, name),
         };
-        if (isFullAdmin)
+        if (isAdmin)
             claims.Add(new Claim(ClaimTypes.Role, IamSelfConsumerApp.AdminRole));
+        if (mustChangePassword)
+            claims.Add(new Claim("must_change_password", "true"));
 
         var identity = new ClaimsIdentity(claims, ConsoleAuth.Scheme);
         await http.SignInAsync(ConsoleAuth.Scheme, new ClaimsPrincipal(identity));

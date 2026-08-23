@@ -40,8 +40,8 @@ public static class ConsoleHtml
         </body></html>
         """;
 
-    /// <param name="returnUrl">Where to land after a successful full-admin sign-in —
-    /// set when the cookie scheme's own Challenge() (e.g. OidcEndpoints' /connect/authorize
+    /// <param name="returnUrl">Where to land after a successful sign-in — set
+    /// when the cookie scheme's own Challenge() (e.g. OidcEndpoints' /connect/authorize
     /// handler) redirected here with ?ReturnUrl=..., so the console can hand the caller
     /// back to whatever triggered the challenge instead of always landing on /console.
     /// Carried as a hidden field, not left in the query string: the form's action has
@@ -51,9 +51,8 @@ public static class ConsoleHtml
     {
         var errorHtml = error is null ? "" : $"""<p class="error">{E(error)}</p>""";
         var returnUrlHtml = returnUrl is null ? "" : $"""<input type="hidden" name="ReturnUrl" value="{E(returnUrl)}">""";
-        return Page("Break-glass sign-in", $"""
-            <p>Bootstrap/break-glass console — spec section 3.1. Requires an
-            <code>iam:admin</code> grant.</p>
+        return Page("Sign in to Gorilla.IAM", $"""
+            <p>Sign in with your Gorilla.IAM credentials.</p>
             {errorHtml}
             <form method="post" action="/console/login">
               {returnUrlHtml}
@@ -64,12 +63,17 @@ public static class ConsoleHtml
             """);
     }
 
-    public static string ChangePasswordPage(string? error = null)
+    /// <param name="returnUrl">See LoginPage's — carried through so a subject who
+    /// arrived here mid-OIDC-flow (a pending forced reset) lands back in that flow
+    /// after signing in again with the new password, instead of at a bare /console.</param>
+    public static string ChangePasswordPage(string? error = null, string? returnUrl = null)
     {
         var errorHtml = error is null ? "" : $"""<p class="error">{E(error)}</p>""";
+        var returnUrlHtml = returnUrl is null ? "" : $"""<input type="hidden" name="ReturnUrl" value="{E(returnUrl)}">""";
         return Page("Change password", $"""
             <p>{errorHtml}</p>
             <form method="post" action="/console/change-password">
+              {returnUrlHtml}
               <p><label>Current password <input type="password" name="currentPassword" required autofocus></label></p>
               <p><label>New password <input type="password" name="newPassword" required></label></p>
               <p><label>Confirm new password <input type="password" name="confirmPassword" required></label></p>
@@ -78,6 +82,15 @@ public static class ConsoleHtml
             <form method="post" action="/console/logout"><button type="submit">Sign out instead</button></form>
             """);
     }
+
+    /// <summary>Shown when an authenticated, non-pending, non-admin subject reaches
+    /// a console page gated on the admin role — sign-in succeeded (this console's
+    /// login is no longer admin-only, see BreakGlassAuthenticator's class doc), but
+    /// the console's own subject-management pages still are.</summary>
+    public static string AccessDeniedPage() => Page("Access denied", """
+        <p>You're signed in, but this area requires an <code>iam:admin</code> grant.</p>
+        <form method="post" action="/console/logout"><button type="submit">Sign out</button></form>
+        """);
 
     public static string Dashboard(
         IReadOnlyList<SubjectSummary> subjects,

@@ -1,7 +1,9 @@
+using System.Threading.RateLimiting;
 using Gorilla.IAM.Console;
 using Gorilla.IAM.Data;
 using Gorilla.IAM.Oidc;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using OpenIddict.Abstractions;
 using static OpenIddict.Abstractions.OpenIddictConstants;
@@ -48,6 +50,13 @@ builder.Services.AddAuthentication()
         // *authenticated* principal that fails a policy, so landing here
         // always means the latter state; sending them anywhere else would
         // be a dead end with no way to reach the one page that unblocks them.
+        // A cookie from this scheme can land here in two cases now that
+        // BreakGlassAuthenticator isn't admin-only (see its class doc): a
+        // pending forced reset, or a regular non-admin denied a
+        // RequireRole(admin) page. /console/change-password's own GET
+        // handler distinguishes them (the must_change_password claim,
+        // ConsoleEndpoints.SignInAsync) and shows the right thing either way
+        // — an access-denied message for the latter, not a dead end.
         options.AccessDeniedPath = "/console/change-password";
         options.ExpireTimeSpan = TimeSpan.FromMinutes(60);
         options.SlidingExpiration = true;
@@ -159,6 +168,26 @@ var allowedOrigins = builder.Configuration.GetSection("Iam:AllowedOrigins").Get<
 builder.Services.AddCors(opt =>
     opt.AddDefaultPolicy(p => p.WithOrigins(allowedOrigins).AllowAnyHeader().AllowAnyMethod()));
 
+// Login just went from admin-only-and-obscure to the estate's public front
+// door (BreakGlassAuthenticator no longer gates on iam:admin — see its class
+// doc) — a per-IP limit on credential-guessing attempts, applied to
+// POST /console/login only (ConsoleEndpoints.cs). Fixed-window, not sliding:
+// simpler, and 10 attempts / 5 min is generous enough that the distinction
+// doesn't matter here. QueueLimit 0 rejects immediately over the limit
+// rather than making callers wait.
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddPolicy("login", httpContext => RateLimitPartition.GetFixedWindowLimiter(
+        partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        factory: _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 10,
+            Window = TimeSpan.FromMinutes(5),
+            QueueLimit = 0,
+        }));
+});
+
 var app = builder.Build();
 
 // KNOWN GAP, deliberately not solved here: once the gateway has an actual
@@ -177,6 +206,11 @@ var app = builder.Build();
 // Revisit when the nginx route + compose service are added and this can be
 // tested against the real thing instead of curl simulations.
 app.UseForwardedHeaders();
+
+// After UseForwardedHeaders, not before: the login rate limiter partitions
+// on Connection.RemoteIpAddress, which UseForwardedHeaders is what makes
+// reflect the real client IP instead of the gateway's.
+app.UseRateLimiter();
 
 if (app.Environment.IsDevelopment())
 {

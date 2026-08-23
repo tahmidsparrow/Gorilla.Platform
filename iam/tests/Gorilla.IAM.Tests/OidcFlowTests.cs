@@ -8,6 +8,7 @@ using Gorilla.IAM.Data.Entities;
 using static Gorilla.IAM.Data.IamSelfConsumerApp;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Gorilla.IAM.Tests;
@@ -35,15 +36,75 @@ public class OidcFlowTests
 
     private const string RedirectUri = "http://127.0.0.1:9999/callback";
     private const string ClientId = "ats";
+    private const string Password = "FlowTest@123";
 
     [SkippableFact]
-    public async Task Authorization_code_PKCE_and_refresh_token_grants_all_issue_real_tokens()
+    public async Task Admin_subject_with_an_ats_grant_completes_the_full_flow()
+    {
+        await RunSkippableAsync(async factory =>
+        {
+            // Grants BOTH iam:admin and an ats role — proves the admin path still
+            // works end to end after opening login to everyone (this session's
+            // grant check now requires an ats grant specifically; iam:admin alone
+            // no longer implies access to every other app's client).
+            var (email, subjectId) = await SeedSubjectAsync(factory, "OIDC Flow Test Admin", [(AppKey, AdminRole), ("ats", "SuperAdmin")]);
+            await AssertFullFlowSucceedsAsync(factory, email, subjectId, "OIDC Flow Test Admin");
+        });
+    }
+
+    /// <summary>The master regression test: before this plan's changes, a subject
+    /// without iam:admin could not complete ANY OIDC sign-in at all — retiring RG's
+    /// own local login would have locked out every ordinary Recruiter/Interviewer.
+    /// This is that exact scenario, proven to work now.</summary>
+    [SkippableFact]
+    public async Task Non_admin_subject_with_only_an_ats_grant_completes_the_full_flow()
+    {
+        await RunSkippableAsync(async factory =>
+        {
+            var (email, subjectId) = await SeedSubjectAsync(factory, "OIDC Flow Test Non-Admin", [("ats", "Recruiter")]);
+            await AssertFullFlowSucceedsAsync(factory, email, subjectId, "OIDC Flow Test Non-Admin");
+        });
+    }
+
+    /// <summary>The other half of the same regression: opening login to everyone
+    /// must not mean every subject gets a token for every app. A subject who is a
+    /// real, active, correctly-authenticated IAM subject but holds no grant for
+    /// "ats" at all must be refused here, not handed a token that RG would then
+    /// have to be trusted to refuse on its own.</summary>
+    [SkippableFact]
+    public async Task Subject_with_no_ats_grant_is_refused_access_denied()
+    {
+        await RunSkippableAsync(async factory =>
+        {
+            // iam:admin only — proves this is genuinely about the ats grant, not
+            // just "no grants of any kind."
+            var (email, _) = await SeedSubjectAsync(factory, "OIDC Flow Test No Ats Grant", [(AppKey, AdminRole)]);
+
+            var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+            var (_, challenge) = GeneratePkcePair();
+            var authorizeUrl = BuildAuthorizeUrl(challenge);
+
+            var loginRedirect = await LoginAndGetContinuationUrlAsync(client, authorizeUrl, email, Password);
+            var authorizeResponse = await client.GetAsync(loginRedirect);
+
+            // OAuth2 convention: an authorization error is still a redirect to
+            // RedirectUri, just carrying ?error=access_denied instead of ?code=...
+            // — not a raw 403. OpenIddict's Results.Forbid(..., Error=access_denied)
+            // produces exactly this.
+            Assert.Equal(HttpStatusCode.Redirect, authorizeResponse.StatusCode);
+            var deniedLocation = authorizeResponse.Headers.Location
+                ?? throw new InvalidOperationException("Denied authorize response carried no redirect Location.");
+            Assert.StartsWith(RedirectUri, deniedLocation.ToString());
+            var deniedQuery = System.Web.HttpUtility.ParseQueryString(deniedLocation.Query);
+            Assert.Equal("access_denied", deniedQuery["error"]);
+            Assert.Null(deniedQuery["code"]);
+        });
+    }
+
+    private static async Task RunSkippableAsync(Func<WebApplicationFactory<Program>, Task> body)
     {
         Skip.If(string.IsNullOrWhiteSpace(ConnectionString),
             "GORILLA_IAM_TEST_MYSQL_CONNECTION is not set — this test needs a real, already-migrated MySQL database.");
-
-        var adminEmail = $"oidc-flow-test-{Guid.NewGuid():N}@example.com";
-        const string adminPassword = "FlowTest@123";
 
         // Program.cs reads ConnectionStrings:DefaultConnection synchronously
         // at the top of Main, before WebApplicationBuilder.Build() — earlier
@@ -57,7 +118,9 @@ public class OidcFlowTests
         Environment.SetEnvironmentVariable("Iam__AtsClientRedirectUris", RedirectUri);
         try
         {
-            await RunFlowAsync(adminEmail, adminPassword);
+            await using var factory = new WebApplicationFactory<Program>()
+                .WithWebHostBuilder(builder => builder.UseEnvironment("Development"));
+            await body(factory);
         }
         finally
         {
@@ -66,58 +129,52 @@ public class OidcFlowTests
         }
     }
 
-    private static async Task RunFlowAsync(string adminEmail, string adminPassword)
+    /// <summary>A fresh, uniquely-emailed subject with a known password and the
+    /// given grants. Written directly rather than via BootstrapAdminSeeder so
+    /// tests don't depend on run order/state left behind by any other test or
+    /// manual session against the same database.</summary>
+    private static async Task<(string Email, Guid SubjectId)> SeedSubjectAsync(
+        WebApplicationFactory<Program> factory, string name, (string AppKey, string Role)[] grants)
     {
-        await using var factory = new WebApplicationFactory<Program>()
-            .WithWebHostBuilder(builder => builder.UseEnvironment("Development"));
-
-        // A fresh, uniquely-emailed subject with a known password and an
-        // iam:admin grant — the one authenticated identity this flow can use
-        // today (see OidcEndpoints' documented limitation). Written directly
-        // rather than via BootstrapAdminSeeder so this test doesn't depend
-        // on run order/state left behind by any other test or manual session
-        // against the same database.
-        Guid subjectId;
-        using (var scope = factory.Services.CreateScope())
+        var email = $"oidc-flow-test-{Guid.NewGuid():N}@example.com";
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<IamDbContext>();
+        var subject = new Subject
         {
-            var db = scope.ServiceProvider.GetRequiredService<IamDbContext>();
-            var subject = new Subject
-            {
-                Email = adminEmail,
-                Name = "OIDC Flow Test Admin",
-                IsActive = true,
-                Credential = new Credential { Algorithm = CredentialAlgorithm.Bcrypt, Hash = BcryptPasswordHasher.Hash(adminPassword) },
-            };
-            db.Subjects.Add(subject);
-            db.RoleGrants.Add(new RoleGrant { SubjectId = subject.Id, AppKey = AppKey, Role = AdminRole });
-            await db.SaveChangesAsync();
-            subjectId = subject.Id;
-        }
+            Email = email,
+            Name = name,
+            IsActive = true,
+            Credential = new Credential { Algorithm = CredentialAlgorithm.Bcrypt, Hash = BcryptPasswordHasher.Hash(Password) },
+        };
+        db.Subjects.Add(subject);
+        db.RoleGrants.AddRange(grants.Select(g => new RoleGrant { SubjectId = subject.Id, AppKey = g.AppKey, Role = g.Role }));
+        await db.SaveChangesAsync();
+        return (email, subject.Id);
+    }
 
-        // WebApplicationFactoryClientOptions.HandleCookies defaults true —
-        // the console login's Set-Cookie is persisted and replayed
-        // automatically on the /connect/authorize request below, same as a
-        // real browser.
-        var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+    private static string BuildAuthorizeUrl(string codeChallenge) =>
+        "/connect/authorize" +
+        $"?client_id={ClientId}" +
+        "&response_type=code" +
+        $"&redirect_uri={Uri.EscapeDataString(RedirectUri)}" +
+        "&scope=openid%20email%20profile%20offline_access" +
+        $"&code_challenge={codeChallenge}" +
+        "&code_challenge_method=S256" +
+        "&state=test-state";
 
-        var (verifier, challenge) = GeneratePkcePair();
-        var authorizeUrl = "/connect/authorize" +
-            $"?client_id={ClientId}" +
-            "&response_type=code" +
-            $"&redirect_uri={Uri.EscapeDataString(RedirectUri)}" +
-            "&scope=openid%20email%20profile%20offline_access" +
-            $"&code_challenge={challenge}" +
-            "&code_challenge_method=S256" +
-            "&state=test-state";
-
-        // Deliberately NOT logging in first: a real browser hits /connect/authorize
-        // with no console session yet, gets challenged to /console/login?ReturnUrl=...,
-        // and the login POST has to actually honor that ReturnUrl to land back here —
-        // logging in first (the original shape of this test) never exercised that
-        // path at all, and missed a real bug: the login handler ignored ReturnUrl
-        // entirely and always redirected to /console, dead-ending every real
-        // first-time browser login. Confirmed only by driving this through an
-        // actual browser (Increment 3) — see ConsoleEndpoints.cs's SafeLocalReturnUrl.
+    /// <summary>Deliberately NOT logging in first: a real browser hits
+    /// /connect/authorize with no console session yet, gets challenged to
+    /// /console/login?ReturnUrl=..., and the login POST has to actually honor that
+    /// ReturnUrl to land back here — logging in first (this test's original shape)
+    /// never exercised that path at all, and missed a real bug: the login handler
+    /// ignored ReturnUrl entirely and always redirected to /console, dead-ending
+    /// every real first-time browser login. Confirmed only by driving this through
+    /// an actual browser (Increment 3) — see ConsoleEndpoints.cs's SafeLocalReturnUrl.
+    /// Returns the post-login redirect Location — the caller decides what to assert
+    /// about hitting it (a real flow continues to a code; a denied one doesn't).</summary>
+    private static async Task<Uri> LoginAndGetContinuationUrlAsync(
+        HttpClient client, string authorizeUrl, string email, string password)
+    {
         var challengeResponse = await client.GetAsync(authorizeUrl);
         Assert.Equal(HttpStatusCode.Redirect, challengeResponse.StatusCode);
         var challengeLocation = challengeResponse.Headers.Location
@@ -129,8 +186,8 @@ public class OidcFlowTests
         var loginResponse = await client.PostAsync("/console/login",
             new FormUrlEncodedContent(new Dictionary<string, string>
             {
-                ["email"] = adminEmail,
-                ["password"] = adminPassword,
+                ["email"] = email,
+                ["password"] = password,
                 ["ReturnUrl"] = returnUrl,
             }));
         Assert.Equal(HttpStatusCode.Redirect, loginResponse.StatusCode);
@@ -138,6 +195,22 @@ public class OidcFlowTests
             ?? throw new InvalidOperationException("Login response carried no redirect Location.");
         var loginRedirectPathAndQuery = loginRedirect.IsAbsoluteUri ? loginRedirect.PathAndQuery : loginRedirect.ToString();
         Assert.Equal(returnUrl, loginRedirectPathAndQuery);
+
+        return loginRedirect;
+    }
+
+    private static async Task AssertFullFlowSucceedsAsync(
+        WebApplicationFactory<Program> factory, string email, Guid subjectId, string expectedName)
+    {
+        // WebApplicationFactoryClientOptions.HandleCookies defaults true —
+        // the console login's Set-Cookie is persisted and replayed
+        // automatically on the /connect/authorize request below, same as a
+        // real browser.
+        var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+
+        var (verifier, challenge) = GeneratePkcePair();
+        var authorizeUrl = BuildAuthorizeUrl(challenge);
+        var loginRedirect = await LoginAndGetContinuationUrlAsync(client, authorizeUrl, email, Password);
 
         var authorizeResponse = await client.GetAsync(loginRedirect);
         Assert.Equal(HttpStatusCode.Redirect, authorizeResponse.StatusCode);
@@ -168,12 +241,12 @@ public class OidcFlowTests
         Assert.False(string.IsNullOrEmpty(refreshToken));
 
         // The id_token is a plain signed JWT — decode its payload directly and check
-        // the claims this increment's /connect/authorize handler is responsible for
-        // shaping correctly: the real subject id, not a placeholder.
+        // the claims the /connect/authorize handler is responsible for shaping
+        // correctly: the real subject id, not a placeholder.
         var claims = DecodeJwtPayload(idToken!);
         Assert.Equal(subjectId.ToString(), claims.GetProperty("sub").GetString());
-        Assert.Equal(adminEmail, claims.GetProperty("email").GetString());
-        Assert.Equal("OIDC Flow Test Admin", claims.GetProperty("name").GetString());
+        Assert.Equal(email, claims.GetProperty("email").GetString());
+        Assert.Equal(expectedName, claims.GetProperty("name").GetString());
         Assert.Equal(ClientId, claims.GetProperty("aud").GetString());
 
         // The access token must ALSO be a plain signed JWT (3 dot-separated segments),

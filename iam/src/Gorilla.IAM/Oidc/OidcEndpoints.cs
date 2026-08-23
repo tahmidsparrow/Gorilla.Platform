@@ -2,7 +2,7 @@ using System.Security.Claims;
 using Gorilla.IAM.Console;
 using Gorilla.IAM.Data;
 using Microsoft.AspNetCore; // GetOpenIddictServerRequest() — OpenIddictServerAspNetCoreHelpers
-using Microsoft.AspNetCore.Authentication; // HttpContext.AuthenticateAsync
+using Microsoft.AspNetCore.Authentication; // HttpContext.AuthenticateAsync, AuthenticationProperties
 using Microsoft.EntityFrameworkCore;
 using OpenIddict.Abstractions; // SetClaim/SetClaims/SetScopes/SetResources/SetDestinations
 using OpenIddict.Server.AspNetCore;
@@ -21,17 +21,11 @@ namespace Gorilla.IAM.Oidc;
 /// discovery document correctly advertised the URL — the framing/discovery
 /// layer and the actual route existing are two different things.
 ///
-/// KNOWN LIMITATION, deliberate for now: the only interactive identity this
-/// service can assert today is the break-glass console's own
-/// <see cref="ConsoleAuth.Scheme"/> cookie — which
-/// <see cref="BreakGlassAuthenticator"/> only issues to subjects holding an
-/// iam:admin grant. That means only break-glass admins can complete this
-/// flow right now; an ordinary RG user (Recruiter, Interviewer) cannot log
-/// in through here yet. Building a general-purpose login page for every
-/// subject is real, separate work — this exists to prove the OpenIddict
-/// plumbing itself (client registration, PKCE, code exchange, token
-/// issuance, claim shape) end to end, which every later increment needs
-/// proven before anything depends on it.
+/// The interactive identity this asserts is the console's own
+/// <see cref="ConsoleAuth.Scheme"/> cookie (<see cref="BreakGlassAuthenticator"/>
+/// — no longer admin-only, see its class doc). Authenticating there proves
+/// who the subject is, not what they may access: the grant check below is
+/// what stops that from being enough on its own.
 /// </summary>
 public static class OidcEndpoints
 {
@@ -63,6 +57,25 @@ public static class OidcEndpoints
                     .ToListAsync())
                 .GroupBy(g => g.AppKey)
                 .ToDictionary(g => g.Key, g => g.Select(x => x.Role).ToArray());
+
+            // Authenticating proves who the subject is; it says nothing about
+            // whether they may use THIS client. role_grants is the authoritative
+            // access-control record (spec section 3.1) — a subject with zero
+            // grants for request.ClientId (e.g. an HR-only user hitting the
+            // "ats" flow, or any subject with no grants at all) must never get a
+            // token for it, regardless of what other apps they're allowed into.
+            // client_id and ConsumerApp.Key align by convention (OpenIddictClientSeeder).
+            if (!rolesByApp.ContainsKey(request.ClientId!))
+            {
+                return Results.Forbid(
+                    new AuthenticationProperties(new Dictionary<string, string?>
+                    {
+                        [OpenIddictServerAspNetCoreConstants.Properties.Error] = Errors.AccessDenied,
+                        [OpenIddictServerAspNetCoreConstants.Properties.ErrorDescription] =
+                            "This account has no access to the requested application.",
+                    }),
+                    [OpenIddictServerAspNetCoreDefaults.AuthenticationScheme]);
+            }
 
             // authenticationType non-null marks this identity as
             // authenticated — required for OpenIddict to accept the
