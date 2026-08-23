@@ -1,7 +1,11 @@
+using System.Threading.RateLimiting;
 using Gorilla.IAM.Console;
 using Gorilla.IAM.Data;
+using Gorilla.IAM.Oidc;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using OpenIddict.Abstractions;
 using static OpenIddict.Abstractions.OpenIddictConstants;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -46,6 +50,13 @@ builder.Services.AddAuthentication()
         // *authenticated* principal that fails a policy, so landing here
         // always means the latter state; sending them anywhere else would
         // be a dead end with no way to reach the one page that unblocks them.
+        // A cookie from this scheme can land here in two cases now that
+        // BreakGlassAuthenticator isn't admin-only (see its class doc): a
+        // pending forced reset, or a regular non-admin denied a
+        // RequireRole(admin) page. /console/change-password's own GET
+        // handler distinguishes them (the must_change_password claim,
+        // ConsoleEndpoints.SignInAsync) and shows the right thing either way
+        // — an access-denied message for the latter, not a dead end.
         options.AccessDeniedPath = "/console/change-password";
         options.ExpireTimeSpan = TimeSpan.FromMinutes(60);
         options.SlidingExpiration = true;
@@ -74,6 +85,20 @@ builder.Services
             .AllowAuthorizationCodeFlow()
             .RequireProofKeyForCodeExchange()
             .AllowRefreshTokenFlow();
+
+        // OpenIddict encrypts access tokens by default (JWE) — fine for validating
+        // its own tokens via AddValidation().UseLocalServer() below, but incompatible
+        // with a plain external resource server's JwtBearer handler, which expects a
+        // signed-only JWT (JWS) it can verify via this server's own JWKS. That is
+        // this token design's entire point (spec section 3.2: "RS256... consumers
+        // discover everything from /.well-known/openid-configuration", section 2:
+        // "Both apps validate offline") — an encrypted token can't be validated
+        // offline by a generic library without also sharing this service's private
+        // encryption key, which would defeat asymmetric signing entirely. Confirmed
+        // the hard way: RG's JwtBearer rejected an IAM access token with
+        // WWW-Authenticate: Bearer error="invalid_token" — decoding its header
+        // showed {"alg":"RSA-OAEP","enc":"A256CBC-HS512"}, a JWE, not a JWS.
+        options.DisableAccessTokenEncryption();
 
         options.RegisterScopes(
             Scopes.OpenId,
@@ -133,6 +158,36 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
     options.KnownProxies.Clear();
 });
 
+// P2 increment 3: RG's frontend calls /connect/token and /.well-known/* directly
+// from the browser (oidc-client-ts) — a genuine cross-origin request the browser
+// blocks without this, unlike /connect/authorize which is a full-page redirect and
+// needs nothing here. Same config-driven pattern as RG's own backend's
+// AllowedOrigins/AddCors (Recruitment.Gorilla.API/Program.cs) — empty by default,
+// same reasoning as Iam:Issuer/BootstrapAdminEmail: "not configured yet" is valid.
+var allowedOrigins = builder.Configuration.GetSection("Iam:AllowedOrigins").Get<string[]>() ?? [];
+builder.Services.AddCors(opt =>
+    opt.AddDefaultPolicy(p => p.WithOrigins(allowedOrigins).AllowAnyHeader().AllowAnyMethod()));
+
+// Login just went from admin-only-and-obscure to the estate's public front
+// door (BreakGlassAuthenticator no longer gates on iam:admin — see its class
+// doc) — a per-IP limit on credential-guessing attempts, applied to
+// POST /console/login only (ConsoleEndpoints.cs). Fixed-window, not sliding:
+// simpler, and 10 attempts / 5 min is generous enough that the distinction
+// doesn't matter here. QueueLimit 0 rejects immediately over the limit
+// rather than making callers wait.
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddPolicy("login", httpContext => RateLimitPartition.GetFixedWindowLimiter(
+        partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        factory: _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 10,
+            Window = TimeSpan.FromMinutes(5),
+            QueueLimit = 0,
+        }));
+});
+
 var app = builder.Build();
 
 // KNOWN GAP, deliberately not solved here: once the gateway has an actual
@@ -152,6 +207,11 @@ var app = builder.Build();
 // tested against the real thing instead of curl simulations.
 app.UseForwardedHeaders();
 
+// After UseForwardedHeaders, not before: the login rate limiter partitions
+// on Connection.RemoteIpAddress, which UseForwardedHeaders is what makes
+// reflect the real client IP instead of the gateway's.
+app.UseRateLimiter();
+
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
@@ -159,9 +219,11 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
+app.UseCors();
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapConsoleEndpoints();
+app.MapOidcEndpoints();
 
 // Liveness only — this service owns no other apps' health, so unlike HR's
 // /api/health this does not aggregate anything. No /api prefix: everything
@@ -193,6 +255,15 @@ using (var scope = app.Services.CreateScope())
         db, builder.Configuration["Iam:BootstrapAdminEmail"]);
     if (bootstrapWarning is not null)
         app.Logger.LogWarning("{Warning}", bootstrapWarning);
+
+    // P2 increment 1: registers Recruitment.Gorilla's SPA as an OpenIddict
+    // client — a different table from ConsumerApps above; see
+    // OpenIddictClientSeeder's doc comment for why both exist.
+    var applicationManager = scope.ServiceProvider.GetRequiredService<IOpenIddictApplicationManager>();
+    var clientWarning = await Gorilla.IAM.Data.Seeding.OpenIddictClientSeeder.SeedAsync(
+        applicationManager, builder.Configuration["Iam:AtsClientRedirectUris"]);
+    if (clientWarning is not null)
+        app.Logger.LogWarning("{Warning}", clientWarning);
 }
 
 app.Run();

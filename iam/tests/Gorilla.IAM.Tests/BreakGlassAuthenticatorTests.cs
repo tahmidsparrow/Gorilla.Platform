@@ -68,6 +68,7 @@ public class BreakGlassAuthenticatorTests : IDisposable
 
         var success = Assert.IsType<LoginResult.Success>(result);
         Assert.Equal("admin@example.com", success.Email);
+        Assert.True(success.IsAdmin);
     }
 
     [Fact]
@@ -98,11 +99,13 @@ public class BreakGlassAuthenticatorTests : IDisposable
         Assert.Equal(LoginFailureReason.SubjectInactive, Assert.IsType<LoginResult.Failure>(result).Reason);
     }
 
-    /// <summary>The whole point of the console's own access gate — a correct
-    /// password alone must not be enough. Spec section 3.1: "gated on a
-    /// dedicated iam:admin grant held by one or two people."</summary>
+    /// <summary>The gate moved: a correct password without an iam:admin grant now
+    /// succeeds (this class is the shared sign-in for every OIDC app, not just the
+    /// console — see its class doc), but IsAdmin correctly comes back false. The
+    /// console's OWN admin-only pages stay gated separately, by ConsoleEndpoints'
+    /// RequireRole(admin) group — not exercised by this class at all.</summary>
     [Fact]
-    public async Task Fails_for_a_correct_password_with_no_iam_admin_grant()
+    public async Task Succeeds_for_a_correct_password_with_no_iam_admin_grant_but_IsAdmin_is_false()
     {
         var subject = new Subject
         {
@@ -116,10 +119,12 @@ public class BreakGlassAuthenticatorTests : IDisposable
 
         var result = await _sut.AuthenticateAsync("notadmin@example.com", "s3cret!");
 
-        Assert.Equal(LoginFailureReason.MissingIamAdminGrant, Assert.IsType<LoginResult.Failure>(result).Reason);
+        var success = Assert.IsType<LoginResult.Success>(result);
+        Assert.False(success.IsAdmin);
     }
 
-    /// <summary>A grant for some other app does not confer console access.</summary>
+    /// <summary>A grant for some other app succeeds here (this class only checks
+    /// credentials, not app access) but still doesn't confer IsAdmin.</summary>
     [Fact]
     public async Task An_hr_admin_grant_does_not_satisfy_the_iam_admin_check()
     {
@@ -136,7 +141,8 @@ public class BreakGlassAuthenticatorTests : IDisposable
 
         var result = await _sut.AuthenticateAsync("hradmin@example.com", "s3cret!");
 
-        Assert.Equal(LoginFailureReason.MissingIamAdminGrant, Assert.IsType<LoginResult.Failure>(result).Reason);
+        var success = Assert.IsType<LoginResult.Success>(result);
+        Assert.False(success.IsAdmin);
     }
 
     /// <summary>The break-glass login must exercise the exact same
@@ -186,12 +192,11 @@ public class BreakGlassAuthenticatorTests : IDisposable
         Assert.IsType<LoginResult.MustChangePassword>(result);
     }
 
-    /// <summary>Ordering guarantee: a non-admin whose credential happens to be
-    /// flagged must never learn that from this console — the failure comes
-    /// back exactly as it would for any other non-admin, not a different
-    /// case that would leak information about their credential state.</summary>
+    /// <summary>MustChangePassword is checked before the admin-grant lookup (spec
+    /// 3.2: no token/session until the password changes) — applies to a non-admin
+    /// exactly the same as an admin, now that both can reach Success at all.</summary>
     [Fact]
-    public async Task A_non_admin_with_a_flagged_credential_still_gets_MissingIamAdminGrant_not_MustChangePassword()
+    public async Task A_non_admin_with_a_flagged_credential_gets_MustChangePassword_not_Success()
     {
         var subject = new Subject
         {
@@ -210,7 +215,7 @@ public class BreakGlassAuthenticatorTests : IDisposable
 
         var result = await _sut.AuthenticateAsync("notadmin@example.com", "s3cret!");
 
-        Assert.Equal(LoginFailureReason.MissingIamAdminGrant, Assert.IsType<LoginResult.Failure>(result).Reason);
+        Assert.IsType<LoginResult.MustChangePassword>(result);
     }
 
     [Fact]

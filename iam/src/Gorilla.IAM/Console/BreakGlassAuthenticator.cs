@@ -10,12 +10,16 @@ public enum LoginFailureReason
     NoSuchSubject,
     WrongPassword,
     SubjectInactive,
-    MissingIamAdminGrant,
 }
 
 public abstract record LoginResult
 {
-    public sealed record Success(Guid SubjectId, string Email, string Name) : LoginResult;
+    /// <param name="IsAdmin">Whether this subject actually holds the iam:admin
+    /// grant — carried, not gated on: any active subject with valid credentials
+    /// succeeds here now (see the class doc for why), but the console's own
+    /// admin-only pages still require this to be true (ConsoleEndpoints'
+    /// RequireRole(IamSelfConsumerApp.AdminRole) group).</param>
+    public sealed record Success(Guid SubjectId, string Email, string Name, bool IsAdmin) : LoginResult;
 
     /// <summary>Credentials, active status and the iam:admin grant all check
     /// out, but an admin reset this password (Credential.MustChangePassword)
@@ -36,14 +40,22 @@ public enum ChangePasswordResult
 
 /// <summary>
 /// Authenticates directly against Subject/Credential/RoleGrant — no
-/// dependency on OpenIddict's authorization-code flow at all. That is the
-/// point, not an oversight: spec section 3.1 calls this a "break-glass"
-/// console needed "before HR is wired up, and when HR is down," and a path
-/// that only works when the full OIDC machinery is also working stops being
-/// break-glass. It still goes through the exact same
-/// CredentialVerifier/rehash-on-verify every other login will eventually
-/// use — "minimal dependencies" does not mean "a separate, untested auth
-/// path."
+/// dependency on OpenIddict's authorization-code flow at all. That was the
+/// original point (spec section 3.1's "break-glass" console, needed "before
+/// HR is wired up, and when HR is down"), and it still holds: this never
+/// depends on OpenIddict's flows being configured or working.
+///
+/// It is no longer break-glass-admin-only, though. This is also the sign-in
+/// every OIDC-participating app's <c>/connect/authorize</c> challenge
+/// depends on (see OidcEndpoints.cs) — any active subject with valid
+/// credentials succeeds here, not just iam:admin holders. The console's own
+/// admin-only pages (subject list, grants) stay gated separately, by
+/// ConsoleEndpoints' RequireRole(IamSelfConsumerApp.AdminRole) group; this
+/// class only answers "are these credentials valid for an active subject,"
+/// same as it always did — it just no longer conflates that with "is this
+/// subject an admin." Goes through the exact same
+/// CredentialVerifier/rehash-on-verify every login uses — "minimal
+/// dependencies" does not mean "a separate, untested auth path."
 /// </summary>
 public class BreakGlassAuthenticator(IamDbContext db)
 {
@@ -68,20 +80,11 @@ public class BreakGlassAuthenticator(IamDbContext db)
         if (!subject.IsActive)
             return new LoginResult.Failure(LoginFailureReason.SubjectInactive);
 
-        var isIamAdmin = subject.RoleGrants.Any(g => g.AppKey == IamSelfConsumerApp.AppKey && g.Role == IamSelfConsumerApp.AdminRole);
-        if (!isIamAdmin)
-            return new LoginResult.Failure(LoginFailureReason.MissingIamAdminGrant);
-
-        // Checked last, deliberately: only reachable once someone has already
-        // proven a valid password, an active subject and an iam:admin grant —
-        // a non-admin whose credential happens to have this flag set (e.g. a
-        // future HR-initiated reset, unrelated to console access) must never
-        // learn that from this console; "invalid credentials" is still all
-        // they get from the failure branches above.
         if (subject.Credential!.MustChangePassword)
             return new LoginResult.MustChangePassword(subject.Id, subject.Email, subject.Name);
 
-        return new LoginResult.Success(subject.Id, subject.Email, subject.Name);
+        var isIamAdmin = subject.RoleGrants.Any(g => g.AppKey == IamSelfConsumerApp.AppKey && g.Role == IamSelfConsumerApp.AdminRole);
+        return new LoginResult.Success(subject.Id, subject.Email, subject.Name, isIamAdmin);
     }
 
     /// <summary>Completes a pending admin-initiated reset. Requires
