@@ -2,8 +2,6 @@ using Gorilla.IAM.Data.Entities;
 
 namespace Gorilla.IAM.Import;
 
-/// <summary>Which source system(s) a planned subject was matched from — purely
-/// informational (dry-run/apply reporting), no behavior depends on it.</summary>
 public enum ImportSource
 {
     HrOnly,
@@ -11,15 +9,16 @@ public enum ImportSource
     Both,
 }
 
-/// <summary>
-/// One subject as <see cref="ImportPlanner"/> decided to import it — the
-/// output of the pure merge, and the input to both the dry-run verifier and
-/// the real database upsert. Never touches a database itself.
-/// </summary>
+/// <param name="AtsRoles">The "ats" role grants to create for this subject,
+/// taken from RG's UserRoles verbatim. Deliberately sourced from the RG row even
+/// when <see cref="Source"/> is <see cref="ImportSource.Both"/> and HR won the
+/// credential: HR winning is about which password verifies, and says nothing
+/// about what someone may do in Recruitment. Empty for an HR-only subject.</param>
 public record SubjectImportPlan(
     string Email,
     string Name,
     bool Active,
     CredentialAlgorithm Algorithm,
     string PasswordHash,
-    ImportSource Source);
+    ImportSource Source,
+    IReadOnlyList<string>? AtsRoles = null);

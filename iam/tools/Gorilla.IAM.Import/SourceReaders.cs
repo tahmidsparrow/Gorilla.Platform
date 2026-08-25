@@ -68,20 +68,46 @@ public static class SourceReaders
         await using var conn = new MySqlConnection(builder.ConnectionString);
         await conn.OpenAsync(ct);
 
-        await using var cmd = new MySqlCommand("SELECT Email, Name, PasswordHash, IsActive FROM Users", conn);
+        // LEFT JOIN, for the same reason HR's query left-joins employees: a user
+        // with no role rows is still a real, importable account. Table/column
+        // names are PascalCase because RG's AppDbContext sets no ToTable or
+        // HasColumnName anywhere and registers no naming convention, so EF's
+        // defaults (DbSet name, CLR property name) are what actually exist in
+        // MySQL — verified against migration AddUsersRolesAndCandidateOwner.
+        await using var cmd = new MySqlCommand(
+            """
+            SELECT u.Email, u.Name, u.PasswordHash, u.IsActive, ur.Role
+            FROM Users u
+            LEFT JOIN UserRoles ur ON ur.UserId = u.Id
+            """, conn);
 
-        var users = new List<SourceUser>();
+        // The join fans out one row per (user, role), so rows are grouped back
+        // into one SourceUser per person rather than read one-to-one. Keyed by
+        // the same normalization ImportPlanner matches on, so a casing
+        // difference here can't split one person into two.
+        var byEmail = new Dictionary<string, (SourceUser User, List<string> Roles)>();
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
-            users.Add(new SourceUser(
-                reader.GetString(0),
-                reader.GetString(1),
-                reader.GetBoolean(3),
-                reader.GetString(2),
-                CredentialAlgorithm.Pbkdf2Sha256));
+            var email = reader.GetString(0);
+            var key = ImportPlanner.Normalize(email);
+
+            if (!byEmail.TryGetValue(key, out var entry))
+            {
+                entry = (new SourceUser(
+                    email,
+                    reader.GetString(1),
+                    reader.GetBoolean(3),
+                    reader.GetString(2),
+                    CredentialAlgorithm.Pbkdf2Sha256), []);
+                byEmail[key] = entry;
+            }
+
+            if (!reader.IsDBNull(4))
+                entry.Roles.Add(reader.GetString(4));
         }
-        return users;
+
+        return byEmail.Values.Select(e => e.User with { Roles = e.Roles }).ToList();
     }
 
     private static string Env(string name, string fallback) => Environment.GetEnvironmentVariable(name) ?? fallback;

@@ -41,7 +41,12 @@ public static class ImportPlanner
                 : hr is not null ? ImportSource.HrOnly
                 : ImportSource.RgOnly;
 
-            plans.Add(new SubjectImportPlan(email, name, winner.Active, winner.Algorithm, winner.PasswordHash, source));
+            // AtsRoles comes from the RG row specifically, NOT from `winner`.
+            // HR winning decides whose password verifies; it says nothing about
+            // what someone may do in Recruitment, so a person in both systems
+            // keeps their RG roles even though HR supplied the credential.
+            plans.Add(new SubjectImportPlan(
+                email, name, winner.Active, winner.Algorithm, winner.PasswordHash, source, rg?.Roles ?? []));
         }
 
         return plans;

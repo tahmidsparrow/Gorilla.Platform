@@ -1,4 +1,5 @@
 using Gorilla.IAM.Data;
+using Gorilla.IAM.Data.Seeding;
 using Gorilla.IAM.Import;
 using Gorilla.IAM.ImportTool;
 using Microsoft.EntityFrameworkCore;
@@ -40,6 +41,38 @@ foreach (var result in dryRun)
     Console.WriteLine($"  [{symbol}] {result.Email} - {result.Outcome}");
 }
 
+// The same go/no-go discipline the credential replay gets, applied to roles:
+// a role string RG has that IAM's "ats" vocabulary doesn't would be silently
+// rejected at apply time and that person would end up with fewer grants than
+// they should have. Validated against ConsumerAppSeedData rather than the
+// database because a dry run deliberately never connects to gorilla_iam — and
+// that list is the same one the DB's consumer_app_roles rows are seeded from.
+var atsRoles = ConsumerAppSeedData.Apps
+    .Single(a => a.Key == RoleGrantImporter.AtsAppKey).Roles
+    .ToHashSet(StringComparer.Ordinal);
+
+var unknownRoles = plans
+    .SelectMany(p => (p.AtsRoles ?? []).Select(r => (p.Email, Role: r)))
+    .Where(x => !atsRoles.Contains(x.Role))
+    .ToList();
+
+var plannedGrants = plans.Sum(p => (p.AtsRoles ?? []).Count);
+Console.WriteLine();
+Console.WriteLine($"Planned {plannedGrants} \"{RoleGrantImporter.AtsAppKey}\" role grant(s) across "
+    + $"{plans.Count(p => (p.AtsRoles ?? []).Count > 0)} subject(s).");
+
+foreach (var (email, role) in unknownRoles)
+    Console.Error.WriteLine($"  [FAILED] {email} - role \"{role}\" is not in the "
+        + $"\"{RoleGrantImporter.AtsAppKey}\" vocabulary ({string.Join(", ", atsRoles)}).");
+
+if (unknownRoles.Count > 0)
+{
+    Console.Error.WriteLine();
+    Console.Error.WriteLine($"{unknownRoles.Count} role(s) are not grantable. Refusing to proceed —"
+        + " add them to ConsumerAppSeedData (and re-seed) or correct them in Recruitment.Gorilla first.");
+    return 1;
+}
+
 if (failed > 0)
 {
     Console.Error.WriteLine();
@@ -69,7 +102,25 @@ var options = new DbContextOptionsBuilder<IamDbContext>()
     .Options;
 
 await using var db = new IamDbContext(options);
-var result2 = await SubjectImporter.ApplyAsync(db, plans);
 
-Console.WriteLine($"Done. Created {result2.Created}, updated {result2.Updated}, unchanged {result2.Unchanged}.");
+// The web app seeds these on boot; this CLI doesn't run that path. Without the
+// "ats" row, role_grants' FK to consumer_apps refuses every grant (and
+// GrantRoleAsync would report every role as unknown), so a fresh database would
+// import subjects and silently no grants. Idempotent, so running it here is free.
+await ConsumerAppSeeder.SeedAsync(db);
+
+var result2 = await SubjectImporter.ApplyAsync(db, plans);
+Console.WriteLine($"Subjects: created {result2.Created}, updated {result2.Updated}, unchanged {result2.Unchanged}.");
+
+var grants = await RoleGrantImporter.ApplyAsync(db, plans);
+Console.WriteLine($"Role grants: granted {grants.Granted}, already granted {grants.AlreadyGranted}, rejected {grants.Rejected}.");
+
+if (grants.Rejected > 0)
+{
+    Console.Error.WriteLine($"WARNING: {grants.Rejected} grant(s) were rejected as unknown app/role."
+        + " Those people will be refused at /connect/authorize until it's corrected.");
+    return 1;
+}
+
+Console.WriteLine("Done.");
 return 0;
