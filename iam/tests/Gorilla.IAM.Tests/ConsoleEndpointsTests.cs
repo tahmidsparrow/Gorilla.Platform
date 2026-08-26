@@ -23,6 +23,7 @@ namespace Gorilla.IAM.Tests;
 /// password form, and an admin's existing voluntary self-service rotation
 /// still working unchanged.
 /// </summary>
+[Collection(IamMySqlCollection.Name)]
 public class ConsoleEndpointsTests
 {
     private static string? ConnectionString => Environment.GetEnvironmentVariable("GORILLA_IAM_TEST_MYSQL_CONNECTION");
@@ -135,19 +136,12 @@ public class ConsoleEndpointsTests
     private static async Task RunSkippableAsync(Func<WebApplicationFactory<Program>, Task> body)
     {
         Skip.If(string.IsNullOrWhiteSpace(ConnectionString),
-            "GORILLA_IAM_TEST_MYSQL_CONNECTION is not set — this test needs a real, already-migrated MySQL database.");
+            "GORILLA_IAM_TEST_MYSQL_CONNECTION is not set — this test needs a MySQL server to create a throwaway database on.");
 
-        Environment.SetEnvironmentVariable("ConnectionStrings__DefaultConnection", ConnectionString);
-        try
-        {
-            await using var factory = new WebApplicationFactory<Program>()
-                .WithWebHostBuilder(builder => builder.UseEnvironment("Development"));
-            await body(factory);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable("ConnectionStrings__DefaultConnection", null);
-        }
+        // A throwaway database, dropped afterwards — never the one the env var names.
+        // See IamTestDatabase for why.
+        await using var database = await IamTestDatabase.CreateAsync(ConnectionString!);
+        await body(database.Factory);
     }
 
     private static async Task<string> SeedSubjectAsync(
