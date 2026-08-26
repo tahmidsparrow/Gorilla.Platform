@@ -1,3 +1,5 @@
+using Gorilla.IAM.Data;
+
 namespace Gorilla.IAM.Import;
 
 /// <summary>
@@ -52,8 +54,8 @@ public static class ImportPlanner
         return plans;
     }
 
-    /// <summary>Lowercase + trim, matching reconcile_users.py's normalize_email —
-    /// same reasoning: casing/whitespace differences between the two apps'
-    /// signup forms must not produce a false "these are different people."</summary>
-    public static string Normalize(string email) => email.Trim().ToLowerInvariant();
+    /// <summary>Kept as the import pipeline's own entry point (its call sites and
+    /// tests read better for it), but the rule itself lives in one place now — see
+    /// <see cref="SubjectEmail"/> for why every writer and reader must agree.</summary>
+    public static string Normalize(string email) => SubjectEmail.Normalize(email);
 }

@@ -1,9 +1,11 @@
 using System.Net;
 using Gorilla.IAM.Auth;
+using Gorilla.IAM.Console;
 using Gorilla.IAM.Data;
 using Gorilla.IAM.Data.Entities;
 using static Gorilla.IAM.Data.IamSelfConsumerApp;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -118,6 +120,94 @@ public class ConsoleEndpointsTests
             Assert.Contains("currentPassword", page);
             Assert.DoesNotContain("requires an", page);
         });
+    }
+
+    [SkippableFact]
+    public async Task An_admin_can_create_a_person_who_then_appears_on_the_dashboard()
+    {
+        await RunSkippableAsync(async factory =>
+        {
+            var adminEmail = await SeedSubjectAsync(factory, mustChangePassword: false, grants: [(AppKey, AdminRole)]);
+            var client = await SignInAsync(factory, adminEmail, Password);
+
+            var created = await client.PostAsync("/console/subjects",
+                new FormUrlEncodedContent(new Dictionary<string, string>
+                {
+                    ["email"] = "brand.new@example.com",
+                    ["name"] = "Brand New",
+                    ["temporaryPassword"] = "Temp@12345",
+                }));
+
+            Assert.Equal(HttpStatusCode.Redirect, created.StatusCode);
+            var (path, query) = PathAndQuery(created.Headers.Location!);
+            Assert.Equal("/console", path);
+            Assert.DoesNotContain("createFailed", query);
+
+            var dashboard = await client.GetStringAsync("/console");
+            Assert.Contains("brand.new@example.com", dashboard);
+        });
+    }
+
+    [SkippableFact]
+    public async Task A_failed_create_comes_back_with_a_reason_the_dashboard_renders()
+    {
+        await RunSkippableAsync(async factory =>
+        {
+            var adminEmail = await SeedSubjectAsync(factory, mustChangePassword: false, grants: [(AppKey, AdminRole)]);
+            var client = await SignInAsync(factory, adminEmail, Password);
+
+            var created = await client.PostAsync("/console/subjects",
+                new FormUrlEncodedContent(new Dictionary<string, string>
+                {
+                    ["email"] = "weak@example.com", ["name"] = "Weak", ["temporaryPassword"] = "short",
+                }));
+
+            Assert.Equal(HttpStatusCode.Redirect, created.StatusCode);
+            var (_, query) = PathAndQuery(created.Headers.Location!);
+            Assert.Contains(nameof(CreateSubjectResult.PolicyViolation), query);
+
+            var dashboard = await client.GetStringAsync($"/console{query}");
+            Assert.Contains("did not meet the policy", dashboard);
+        });
+    }
+
+    /// <summary>Creating a person is an admin action — the route sits in the
+    /// RequireRole(admin) group, so an ordinary signed-in subject must not reach it
+    /// even though they can now sign in perfectly well.</summary>
+    [SkippableFact]
+    public async Task A_non_admin_cannot_create_a_person()
+    {
+        await RunSkippableAsync(async factory =>
+        {
+            var email = await SeedSubjectAsync(factory, mustChangePassword: false, grants: [("ats", "Recruiter")]);
+            var client = await SignInAsync(factory, email, Password);
+
+            var created = await client.PostAsync("/console/subjects",
+                new FormUrlEncodedContent(new Dictionary<string, string>
+                {
+                    ["email"] = "sneaky@example.com", ["name"] = "Sneaky", ["temporaryPassword"] = "Temp@12345",
+                }));
+
+            // AccessDeniedPath sends a role-denied principal to /console/change-password
+            // rather than returning a bare 403 — either way it is not a create.
+            Assert.NotEqual("/console", PathAndQuery(created.Headers.Location ?? new Uri("/x", UriKind.Relative)).Path);
+
+            using var scope = factory.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<IamDbContext>();
+            Assert.False(await db.Subjects.AnyAsync(s => s.Email == "sneaky@example.com"));
+        });
+    }
+
+    /// <summary>Signs in and returns the cookie-carrying client, so each test does not
+    /// re-spell the login POST.</summary>
+    private static async Task<HttpClient> SignInAsync(
+        WebApplicationFactory<Program> factory, string email, string password)
+    {
+        var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        var login = await client.PostAsync("/console/login",
+            new FormUrlEncodedContent(new Dictionary<string, string> { ["email"] = email, ["password"] = password }));
+        Assert.Equal(HttpStatusCode.Redirect, login.StatusCode);
+        return client;
     }
 
     /// <summary>WebApplicationFactory's redirect Location headers come back as

@@ -208,4 +208,103 @@ public class SubjectAdminServiceTests : IDisposable
     {
         await Assert.ThrowsAsync<KeyNotFoundException>(() => _sut.ResetPasswordAsync(Guid.NewGuid(), "newValidPass2"));
     }
+
+    // ----- Creating a person who exists in neither HR nor RG -----
+
+    [Fact]
+    public async Task Create_makes_an_active_subject_that_must_change_its_password()
+    {
+        var result = await _sut.CreateSubjectAsync("new@example.com", "New Person", "Temp@12345");
+
+        Assert.Equal(CreateSubjectResult.Created, result);
+        var subject = await _db.Subjects.Include(s => s.Credential).SingleAsync(s => s.Email == "new@example.com");
+        Assert.True(subject.IsActive);
+        Assert.Equal("New Person", subject.Name);
+        Assert.Equal(CredentialAlgorithm.Bcrypt, subject.Credential!.Algorithm);
+        Assert.True(subject.Credential.MustChangePassword);
+        Assert.True(BcryptPasswordHasher.Verify("Temp@12345", subject.Credential.Hash));
+    }
+
+    /// <summary>The main correctness risk in this feature: BreakGlassAuthenticator
+    /// looks a subject up by the normalized email, so anything stored in another
+    /// shape is an account nobody can ever sign into. MySQL's case-insensitive
+    /// collation would hide this locally — SQLite here does not.</summary>
+    [Fact]
+    public async Task Create_stores_the_email_normalized_even_when_the_form_supplies_mixed_case_and_spaces()
+    {
+        await _sut.CreateSubjectAsync("  New.Person@Example.COM  ", "New Person", "Temp@12345");
+
+        Assert.True(await _db.Subjects.AnyAsync(s => s.Email == "new.person@example.com"));
+    }
+
+    /// <summary>...and the account created that way is genuinely usable — the real
+    /// point of normalizing, asserted through the login path rather than trusting
+    /// the stored string alone.</summary>
+    [Fact]
+    public async Task A_subject_created_from_a_mixed_case_email_can_actually_sign_in()
+    {
+        await _sut.CreateSubjectAsync("New.Person@Example.COM", "New Person", "Temp@12345");
+
+        var result = await new BreakGlassAuthenticator(_db).AuthenticateAsync("new.person@example.com", "Temp@12345");
+
+        // MustChangePassword, not Success — created subjects land in the same state
+        // an admin-initiated reset produces, on purpose.
+        Assert.IsType<LoginResult.MustChangePassword>(result);
+    }
+
+    [Fact]
+    public async Task Create_rejects_a_duplicate_email_rather_than_hitting_the_unique_index()
+    {
+        await _sut.CreateSubjectAsync("dupe@example.com", "First", "Temp@12345");
+
+        var result = await _sut.CreateSubjectAsync("dupe@example.com", "Second", "Temp@12345");
+
+        Assert.Equal(CreateSubjectResult.EmailAlreadyExists, result);
+        Assert.Equal(1, await _db.Subjects.CountAsync(s => s.Email == "dupe@example.com"));
+    }
+
+    /// <summary>Two addresses differing only by case are the same person, so this
+    /// must be caught by the duplicate check and not slip past it.</summary>
+    [Fact]
+    public async Task Create_rejects_a_duplicate_that_differs_only_by_case()
+    {
+        await _sut.CreateSubjectAsync("dupe@example.com", "First", "Temp@12345");
+
+        var result = await _sut.CreateSubjectAsync("DUPE@Example.com", "Second", "Temp@12345");
+
+        Assert.Equal(CreateSubjectResult.EmailAlreadyExists, result);
+        Assert.Equal(1, await _db.Subjects.CountAsync());
+    }
+
+    [Fact]
+    public async Task Create_rejects_a_weak_password_and_writes_nothing()
+    {
+        var result = await _sut.CreateSubjectAsync("weak@example.com", "Weak", "short");
+
+        Assert.Equal(CreateSubjectResult.PolicyViolation, result);
+        Assert.Empty(await _db.Subjects.ToListAsync());
+    }
+
+    [Theory]
+    [InlineData("", "Name")]
+    [InlineData("not-an-email", "Name")]
+    [InlineData("ok@example.com", "")]
+    [InlineData("ok@example.com", "   ")]
+    public async Task Create_rejects_a_missing_or_malformed_email_or_name(string email, string name)
+    {
+        var result = await _sut.CreateSubjectAsync(email, name, "Temp@12345");
+
+        Assert.Equal(CreateSubjectResult.InvalidEmail, result);
+        Assert.Empty(await _db.Subjects.ToListAsync());
+    }
+
+    /// <summary>Creation deliberately grants nothing — app roles come from the
+    /// dashboard's own per-row control afterwards.</summary>
+    [Fact]
+    public async Task Create_grants_no_roles()
+    {
+        await _sut.CreateSubjectAsync("new@example.com", "New Person", "Temp@12345");
+
+        Assert.Empty(await _db.RoleGrants.ToListAsync());
+    }
 }
