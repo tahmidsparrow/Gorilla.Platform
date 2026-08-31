@@ -10,7 +10,10 @@ volumes:
 
 services:
   mysql:
-    image: mysql:9
+    # Pinned to a minor. The floating `mysql:9` silently moved to 9.7.2 and the
+    # estate's only integration test started failing during database init — a
+    # class of breakage that must never arrive without a commit.
+    image: mysql:9.7
     networks: [gorilla]
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
@@ -20,10 +23,22 @@ services:
       - mysql_data:/var/lib/mysql
       - ./mysql-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      # 127.0.0.1, not localhost: the MySQL client reads "localhost" as "use the
+      # unix socket", and during initialisation the image runs a temporary
+      # bootstrap server on that same socket with networking off (it logs
+      # `port: 0`). Pinging the socket therefore reports healthy against a server
+      # that is about to be shut down and replaced, so dependents start against a
+      # database that vanishes under them. Forcing TCP means the check can only
+      # pass once the real server is accepting connections.
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
       interval: 5s
       timeout: 5s
       retries: 20
+      # Failures inside this window don't count toward `retries`. Without it the
+      # 20 retries are spent on a database that is still legitimately initialising
+      # — first-boot init plus the mysql-init scripts ran ~30s locally and longer
+      # on a loaded CI runner, which is exactly how this surfaced.
+      start_period: 90s
     restart: unless-stopped
     # No `ports:` — only the gateway is reachable from the host.
 
