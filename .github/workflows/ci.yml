@@ -67,6 +67,7 @@ jobs:
           RECRUITMENT_DB_PASSWORD=ci-ats-pw
           HR_SECRET_KEY=ci-only-not-a-real-secret-please-change
           ATS_JWT_KEY=ci-only-not-a-real-secret-32-bytes-min
+          ATS_ENCRYPTION_KEY=ci-only-not-a-real-encryption-key
           ATS_SEED_ADMIN_EMAIL=admin@recruitmentgorilla.com
           ATS_SEED_ADMIN_PASSWORD_HASH=1000.Y2ktc2FsdA==.Y2ktaGFzaA==
           EOF

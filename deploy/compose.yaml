@@ -117,6 +117,11 @@ services:
         server=mysql;port=3306;database=RecruitmentGorilla;
         user=recruitment_app;password=${RECRUITMENT_DB_PASSWORD}
       Jwt__Key: ${ATS_JWT_KEY}
+      # Root key for secrets RG stores encrypted at rest (currently the in-app
+      # SMTP password). Program.cs refuses to start without it. It must stay
+      # STABLE across restarts and redeploys: rotate it and every previously
+      # stored ciphertext becomes undecryptable.
+      Encryption__Key: ${ATS_ENCRYPTION_KEY}
       Jwt__Issuer: RecruitmentGorilla
       Jwt__Audience: RecruitmentGorilla
       Auth__SeedAdminEmail: ${ATS_SEED_ADMIN_EMAIL}
