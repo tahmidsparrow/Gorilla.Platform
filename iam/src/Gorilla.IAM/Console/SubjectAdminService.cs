@@ -20,6 +20,14 @@ public enum ResetPasswordResult
     PolicyViolation,
 }
 
+public enum CreateSubjectResult
+{
+    Created,
+    EmailAlreadyExists,
+    InvalidEmail,
+    PolicyViolation,
+}
+
 /// <summary>
 /// The break-glass console's actual operations — spec section 3.1's
 /// deliberately spartan list: "list subjects, toggle grants, deactivate."
@@ -130,5 +138,65 @@ public class SubjectAdminService(IamDbContext db)
         subject.Credential.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
         return ResetPasswordResult.Reset;
+    }
+
+    /// <summary>
+    /// Creates a person who exists in neither HR nor Recruitment.Gorilla.
+    ///
+    /// Until now the only way into <c>subjects</c> was the import tool reading the
+    /// two apps' own user tables, which is fine only while those apps still own
+    /// their logins. Once Recruitment's local login retires there is otherwise
+    /// nowhere for a new hire to be created at all — RG's creation is gone, HR's
+    /// console is P4, and this service could administer everyone except add anyone.
+    ///
+    /// Lands the new subject in exactly the state
+    /// <see cref="ResetPasswordAsync"/> produces — bcrypt credential,
+    /// <c>MustChangePassword</c> set — so first sign-in goes through the
+    /// forced-change path that already exists rather than a second one. As with a
+    /// reset, no email is sent: handing over the temporary password is the admin's
+    /// job, out of band.
+    ///
+    /// Note this is for people the source systems don't have. If the same email
+    /// later turns up in HR or RG, the import matches by email and will overwrite
+    /// this credential — deliberate there ("re-running the import is how a changed
+    /// password gets reflected"), and worth knowing here.
+    /// </summary>
+    public async Task<CreateSubjectResult> CreateSubjectAsync(
+        string email, string name, string temporaryPassword, CancellationToken ct = default)
+    {
+        // Normalized before both the duplicate check and the insert — a subject
+        // stored in any other shape is one BreakGlassAuthenticator can never find.
+        // See SubjectEmail.
+        var normalizedEmail = SubjectEmail.Normalize(email);
+
+        if (normalizedEmail.Length == 0 || !normalizedEmail.Contains('@'))
+            return CreateSubjectResult.InvalidEmail;
+
+        if (string.IsNullOrWhiteSpace(name))
+            return CreateSubjectResult.InvalidEmail;
+
+        if (PasswordPolicy.Validate(temporaryPassword) is not null)
+            return CreateSubjectResult.PolicyViolation;
+
+        // Checked rather than left to the unique index: an admin typing an address
+        // that already exists should get told so, not a raw DbUpdateException.
+        if (await db.Subjects.AnyAsync(s => s.Email == normalizedEmail, ct))
+            return CreateSubjectResult.EmailAlreadyExists;
+
+        db.Subjects.Add(new Subject
+        {
+            Email = normalizedEmail,
+            Name = name.Trim(),
+            IsActive = true,
+            Credential = new Credential
+            {
+                Algorithm = CredentialAlgorithm.Bcrypt,
+                Hash = BcryptPasswordHasher.Hash(temporaryPassword),
+                MustChangePassword = true,
+            },
+        });
+
+        await db.SaveChangesAsync(ct);
+        return CreateSubjectResult.Created;
     }
 }

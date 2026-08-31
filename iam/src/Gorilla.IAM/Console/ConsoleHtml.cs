@@ -96,7 +96,8 @@ public static class ConsoleHtml
         IReadOnlyList<SubjectSummary> subjects,
         IReadOnlyList<(string AppKey, string[] Roles)> grantableRoles,
         string signedInAsEmail,
-        bool resetFailed = false)
+        bool resetFailed = false,
+        string? createFailed = null)
     {
         var roleOptions = string.Join("", grantableRoles.SelectMany(a =>
             a.Roles.Select(r => $"""<option value="{E(a.AppKey)}:{E(r)}">{E(a.AppKey)}:{E(r)}</option>""")));
@@ -146,18 +147,46 @@ public static class ConsoleHtml
             ? """<p class="error">Reset failed: the password did not meet the policy (at least 8 characters, at most 72 bytes, a letter and a digit).</p>"""
             : "";
 
+        // Distinct reasons rather than one generic failure: unlike the login form —
+        // where telling an unauthenticated caller which part was wrong leaks whether
+        // an account exists — this is an admin acting on someone else, and "that
+        // address is already taken" versus "that password is too weak" are different
+        // things to fix.
+        var createFailedHtml = createFailed switch
+        {
+            nameof(CreateSubjectResult.EmailAlreadyExists) =>
+                """<p class="error">Not created: a subject with that email already exists.</p>""",
+            nameof(CreateSubjectResult.InvalidEmail) =>
+                """<p class="error">Not created: an email address and a name are both required.</p>""",
+            nameof(CreateSubjectResult.PolicyViolation) =>
+                """<p class="error">Not created: the temporary password did not meet the policy (at least 8 characters, at most 72 bytes, a letter and a digit).</p>""",
+            _ => "",
+        };
+
         return Page("Subjects", $"""
             <p>Signed in as {E(signedInAsEmail)} —
               <form class="inline" method="post" action="/console/logout"><button type="submit">Sign out</button></form> ·
               <a href="/console/change-password">Change my password</a></p>
             {resetFailedHtml}
+            {createFailedHtml}
+            <h2>Add a person</h2>
+            <p>For someone who exists in neither GorillaHR nor Recruitment.Gorilla —
+            anyone who does is picked up by the import instead. Grant them an app
+            role from the table below once created.</p>
+            <form method="post" action="/console/subjects">
+              <p><label>Email <input type="email" name="email" required></label></p>
+              <p><label>Name <input type="text" name="name" required></label></p>
+              <p><label>Temporary password <input type="password" name="temporaryPassword" required></label></p>
+              <button type="submit">Create</button>
+            </form>
+            <h2>Subjects</h2>
             <table>
               <tr><th>Email</th><th>Name</th><th>Status</th><th>Grants</th><th>Grant a role</th><th></th><th>Reset password</th></tr>
               {rows}
             </table>
-            <p>Resetting a password does not send an email — communicate the
-            temporary password to the person out of band. They must change it
-            on their next sign-in.</p>
+            <p>Neither creating a person nor resetting a password sends an email —
+            communicate the temporary password out of band. Either way they must
+            change it on their next sign-in.</p>
             """);
     }
 }

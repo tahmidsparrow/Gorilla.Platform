@@ -1,3 +1,5 @@
+using Gorilla.IAM.Data;
+
 namespace Gorilla.IAM.Import;
 
 /// <summary>
@@ -41,14 +43,19 @@ public static class ImportPlanner
                 : hr is not null ? ImportSource.HrOnly
                 : ImportSource.RgOnly;
 
-            plans.Add(new SubjectImportPlan(email, name, winner.Active, winner.Algorithm, winner.PasswordHash, source));
+            // AtsRoles comes from the RG row specifically, NOT from `winner`.
+            // HR winning decides whose password verifies; it says nothing about
+            // what someone may do in Recruitment, so a person in both systems
+            // keeps their RG roles even though HR supplied the credential.
+            plans.Add(new SubjectImportPlan(
+                email, name, winner.Active, winner.Algorithm, winner.PasswordHash, source, rg?.Roles ?? []));
         }
 
         return plans;
     }
 
-    /// <summary>Lowercase + trim, matching reconcile_users.py's normalize_email —
-    /// same reasoning: casing/whitespace differences between the two apps'
-    /// signup forms must not produce a false "these are different people."</summary>
-    public static string Normalize(string email) => email.Trim().ToLowerInvariant();
+    /// <summary>Kept as the import pipeline's own entry point (its call sites and
+    /// tests read better for it), but the rule itself lives in one place now — see
+    /// <see cref="SubjectEmail"/> for why every writer and reader must agree.</summary>
+    public static string Normalize(string email) => SubjectEmail.Normalize(email);
 }

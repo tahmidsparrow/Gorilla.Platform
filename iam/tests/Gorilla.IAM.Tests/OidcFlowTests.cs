@@ -23,13 +23,17 @@ namespace Gorilla.IAM.Tests;
 /// key-length bug, and this increment's "Type" column being too narrow —
 /// both found only by actually driving this flow against a real database.
 ///
-/// Opt-in, not run by a plain `dotnet test`: needs a real MySQL server with
-/// the gorilla_iam schema already migrated. Set
-/// GORILLA_IAM_TEST_MYSQL_CONNECTION to run it; skipped — reported as
-/// Skipped, not silently Passed — if unset, so the rest of this suite (86
-/// tests, zero external dependencies) stays exactly as fast and portable as
-/// it always has been.
+/// Opt-in, not run by a plain `dotnet test`: needs a reachable MySQL server.
+/// Set GORILLA_IAM_TEST_MYSQL_CONNECTION to run it; skipped — reported as
+/// Skipped, not silently Passed — if unset, so the rest of this suite stays
+/// exactly as fast and portable as it always has been.
+///
+/// That variable names a <b>server to borrow</b>, not a database to write into:
+/// each run creates and migrates its own throwaway database and drops it
+/// afterwards, so these tests cannot leave anything behind in a real one
+/// (see IamTestDatabase).
 /// </summary>
+[Collection(IamMySqlCollection.Name)]
 public class OidcFlowTests
 {
     private static string? ConnectionString => Environment.GetEnvironmentVariable("GORILLA_IAM_TEST_MYSQL_CONNECTION");
@@ -104,29 +108,15 @@ public class OidcFlowTests
     private static async Task RunSkippableAsync(Func<WebApplicationFactory<Program>, Task> body)
     {
         Skip.If(string.IsNullOrWhiteSpace(ConnectionString),
-            "GORILLA_IAM_TEST_MYSQL_CONNECTION is not set — this test needs a real, already-migrated MySQL database.");
+            "GORILLA_IAM_TEST_MYSQL_CONNECTION is not set — this test needs a MySQL server to create a throwaway database on.");
 
-        // Program.cs reads ConnectionStrings:DefaultConnection synchronously
-        // at the top of Main, before WebApplicationBuilder.Build() — earlier
-        // than WebApplicationFactory's ConfigureAppConfiguration hook can
-        // inject config for a minimal-hosting entry point (confirmed the hard
-        // way: that approach left the connection string empty and Program.cs's
-        // own guard threw). Real process environment variables, set before
-        // the factory ever touches Program.Main, are visible the same way
-        // `dotnet run` with real env vars would see them.
-        Environment.SetEnvironmentVariable("ConnectionStrings__DefaultConnection", ConnectionString);
-        Environment.SetEnvironmentVariable("Iam__AtsClientRedirectUris", RedirectUri);
-        try
-        {
-            await using var factory = new WebApplicationFactory<Program>()
-                .WithWebHostBuilder(builder => builder.UseEnvironment("Development"));
-            await body(factory);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable("ConnectionStrings__DefaultConnection", null);
-            Environment.SetEnvironmentVariable("Iam__AtsClientRedirectUris", null);
-        }
+        // A throwaway database, dropped afterwards — never the one the env var names.
+        // See IamTestDatabase for why.
+        await using var database = await IamTestDatabase.CreateAsync(
+            ConnectionString!,
+            new Dictionary<string, string> { ["Iam__AtsClientRedirectUris"] = RedirectUri });
+
+        await body(database.Factory);
     }
 
     /// <summary>A fresh, uniquely-emailed subject with a known password and the

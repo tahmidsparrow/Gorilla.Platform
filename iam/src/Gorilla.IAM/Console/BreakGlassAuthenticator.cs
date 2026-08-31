@@ -61,7 +61,7 @@ public class BreakGlassAuthenticator(IamDbContext db)
 {
     public async Task<LoginResult> AuthenticateAsync(string email, string password, CancellationToken ct = default)
     {
-        var normalizedEmail = email.Trim().ToLowerInvariant();
+        var normalizedEmail = SubjectEmail.Normalize(email);
         var subject = await db.Subjects
             .Include(s => s.Credential)
             .Include(s => s.RoleGrants)

@@ -166,7 +166,24 @@ public static class ConsoleEndpoints
             var roles = await admin.ListGrantableRolesAsync();
             var email = http.User.FindFirstValue(ClaimTypes.Email) ?? "";
             var resetFailed = http.Request.Query["resetFailed"] == "1";
-            return Results.Content(ConsoleHtml.Dashboard(subjects, roles, email, resetFailed), "text/html");
+            var createFailed = http.Request.Query["createFailed"].ToString();
+            return Results.Content(ConsoleHtml.Dashboard(subjects, roles, email, resetFailed, createFailed), "text/html");
+        });
+
+        // Creating a person is unambiguously an admin action, so it lives in this
+        // group beside grant/revoke/reset rather than the authenticated-only one.
+        // Same redirect-with-a-query-flag idiom as reset-password below: the
+        // dashboard has no per-form state worth preserving, unlike the login and
+        // change-password pages which re-render inline.
+        authorized.MapPost("/subjects", async (HttpContext http, SubjectAdminService admin) =>
+        {
+            var form = await http.Request.ReadFormAsync();
+            var result = await admin.CreateSubjectAsync(
+                form["email"].ToString(), form["name"].ToString(), form["temporaryPassword"].ToString());
+
+            return Results.Redirect(result == CreateSubjectResult.Created
+                ? "/console"
+                : $"/console?createFailed={result}");
         });
 
         authorized.MapPost("/subjects/{id:guid}/active", async (Guid id, HttpContext http, SubjectAdminService admin) =>

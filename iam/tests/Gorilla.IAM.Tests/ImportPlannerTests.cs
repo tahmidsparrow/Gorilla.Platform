@@ -8,8 +8,9 @@ public class ImportPlannerTests
     private static SourceUser Hr(string email, string name = "HR Name", bool active = true, string hash = "hr-hash") =>
         new(email, name, active, hash, CredentialAlgorithm.Bcrypt);
 
-    private static SourceUser Rg(string email, string name = "RG Name", bool active = true, string hash = "rg-hash") =>
-        new(email, name, active, hash, CredentialAlgorithm.Pbkdf2Sha256);
+    private static SourceUser Rg(
+        string email, string name = "RG Name", bool active = true, string hash = "rg-hash", params string[] roles) =>
+        new(email, name, active, hash, CredentialAlgorithm.Pbkdf2Sha256, roles);
 
     [Fact]
     public void HR_only_user_imports_as_HrOnly_with_bcrypt()
@@ -95,5 +96,46 @@ public class ImportPlannerTests
         Assert.Equal(
             new HashSet<string> { "a@example.com", "shared@example.com", "c@example.com" },
             plans.Select(p => p.Email).ToHashSet());
+    }
+
+    /// <summary>The load-bearing one: HR wins the credential for someone in both
+    /// systems, but that says nothing about what they may do in Recruitment — a
+    /// naive `winner.Roles` would silently drop every ATS role for exactly the
+    /// people most likely to have them.</summary>
+    [Fact]
+    public void RG_roles_survive_when_HR_wins_the_credential()
+    {
+        var plans = ImportPlanner.Plan(
+            [Hr("both@example.com")],
+            [Rg("both@example.com", roles: ["Recruiter"])]);
+
+        var plan = Assert.Single(plans);
+        Assert.Equal(ImportSource.Both, plan.Source);
+        Assert.Equal("hr-hash", plan.PasswordHash);          // HR still won the credential
+        Assert.Equal(["Recruiter"], plan.AtsRoles);           // ...and the RG role still survived
+    }
+
+    [Fact]
+    public void All_of_a_multi_role_users_roles_are_planned_not_just_one()
+    {
+        var plans = ImportPlanner.Plan([], [Rg("multi@example.com", roles: ["Recruiter", "Interviewer"])]);
+
+        Assert.Equal(["Recruiter", "Interviewer"], Assert.Single(plans).AtsRoles);
+    }
+
+    [Fact]
+    public void An_HR_only_user_is_planned_with_no_ats_roles()
+    {
+        var plans = ImportPlanner.Plan([Hr("only-hr@example.com")], []);
+
+        Assert.Empty(Assert.Single(plans).AtsRoles!);
+    }
+
+    [Fact]
+    public void An_RG_user_with_no_roles_is_planned_with_none_rather_than_failing()
+    {
+        var plans = ImportPlanner.Plan([], [Rg("roleless@example.com")]);
+
+        Assert.Empty(Assert.Single(plans).AtsRoles!);
     }
 }
