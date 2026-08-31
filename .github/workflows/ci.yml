@@ -20,6 +20,24 @@ jobs:
         with:
           path: Gorilla.Platform
 
+      # GorillaHR is a PRIVATE repo, so the default GITHUB_TOKEN cannot read it
+      # and actions/checkout fails with a bare "Input required and not supplied:
+      # token" that names neither the secret nor the repo. Fail loudly and
+      # specifically instead — this was miscast as a code failure for the whole
+      # of P0-P2, during which this workflow never once ran to completion.
+      - name: Require CROSS_REPO_TOKEN
+        env:
+          CROSS_REPO_TOKEN: ${{ secrets.CROSS_REPO_TOKEN }}
+        run: |
+          if [ -z "$CROSS_REPO_TOKEN" ]; then
+            echo "::error::CROSS_REPO_TOKEN is not set on this repository."
+            echo "The smoke test checks out GorillaHR (private); the default"
+            echo "GITHUB_TOKEN cannot read another private repo. Create a"
+            echo "fine-grained PAT with Contents:Read on GorillaHR, then run:"
+            echo "  gh secret set CROSS_REPO_TOKEN --repo tahmidsparrow/Gorilla.Platform"
+            exit 1
+          fi
+
       # Sibling layout matches deploy/compose.yaml's relative build contexts
       # (../../GorillaHR, ../../Recruitment.Gorilla) — see deploy/README.md.
       - name: Checkout GorillaHR
@@ -35,7 +53,9 @@ jobs:
         with:
           repository: tahmidsparrow/Recruitment.Gorilla
           ref: develop
-          token: ${{ secrets.CROSS_REPO_TOKEN }}
+          # Public repo — the default GITHUB_TOKEN can read it, so this step
+          # keeps working even if the PAT lapses. Only GorillaHR needs the PAT.
+          token: ${{ secrets.CROSS_REPO_TOKEN || github.token }}
           path: Recruitment.Gorilla
 
       - name: Write deploy/.env
@@ -47,6 +67,7 @@ jobs:
           RECRUITMENT_DB_PASSWORD=ci-ats-pw
           HR_SECRET_KEY=ci-only-not-a-real-secret-please-change
           ATS_JWT_KEY=ci-only-not-a-real-secret-32-bytes-min
+          ATS_ENCRYPTION_KEY=ci-only-not-a-real-encryption-key
           ATS_SEED_ADMIN_EMAIL=admin@recruitmentgorilla.com
           ATS_SEED_ADMIN_PASSWORD_HASH=1000.Y2ktc2FsdA==.Y2ktaGFzaA==
           EOF

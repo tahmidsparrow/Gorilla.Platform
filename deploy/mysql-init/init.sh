@@ -1,7 +1,19 @@
 #!/bin/bash
-# Runs once against an empty MySQL data volume (docker-entrypoint-initdb.d
-# executes .sh scripts with the same env vars as the server container).
+# Runs once against an empty MySQL data volume.
 # Creates the per-app databases and app-level users.
+#
+# The image SOURCES .sh files in docker-entrypoint-initdb.d rather than
+# executing them, so `set` here mutates the entrypoint's own shell and outlives
+# this file. `set -u` in particular is fatal: a few lines after sourcing us the
+# entrypoint reads $MYSQL_ONETIME_PASSWORD, which it never sets, so nounset
+# aborts it mid-initialisation -- before it stops the temporary bootstrap
+# server. That server keeps /var/run/mysqld/mysqld.sock, and every restart then
+# dies on "Another process with pid N is using unix socket file ... Aborting".
+#
+# Observed exactly that in CI once the smoke test first got far enough to start
+# the stack. So: keep the strict options for our own commands, then put the
+# entrypoint's shell back the way we found it.
+_gorilla_prev_opts="$(set +o)"
 set -euo pipefail
 
 mysql -u root -p"${MYSQL_ROOT_PASSWORD}" <<-EOSQL
@@ -16,3 +28,10 @@ mysql -u root -p"${MYSQL_ROOT_PASSWORD}" <<-EOSQL
 
     FLUSH PRIVILEGES;
 EOSQL
+
+# Restore whatever the entrypoint had set before it sourced this file. Not
+# reached if the block above fails under `set -e` -- which is intended: a
+# half-provisioned database should stop the container loudly, not quietly serve
+# an estate with no schemas.
+eval "$_gorilla_prev_opts"
+unset _gorilla_prev_opts
